@@ -228,6 +228,39 @@ class ClinicalRecordTests(unittest.TestCase):
         self.assertEqual(len(result["records"]), 1)
         self.assertEqual(result["records"][0]["patientunitstayid"], 101)
 
+    def test_numeric_patient_reference_can_explicitly_select_registered_or_historical_source(self) -> None:
+        registered_patient = {"id": 101, "patient_code": "P101"}
+        registered_record = {"record_id": "registered-record"}
+        historical_record = {"record_id": "historical-record"}
+
+        with (
+            patch.object(main.patient_store, "get_patient", return_value=registered_patient),
+            patch.object(
+                main.clinical_record_store,
+                "list_for_patient_id",
+                return_value=[registered_record],
+            ) as registered_query,
+            patch.object(
+                main.clinical_record_store,
+                "list_for_patient",
+                return_value=[historical_record],
+            ) as historical_query,
+        ):
+            registered_status, registered_body = request_app(
+                "/api/patients/101/clinical-records?source=registered&stay_id=7"
+            )
+            historical_status, historical_body = request_app(
+                "/api/patients/101/clinical-records?source=historical"
+            )
+
+        self.assertEqual(registered_status, 200)
+        self.assertEqual(registered_body["records"], [registered_record])
+        registered_query.assert_called_once()
+        self.assertEqual(registered_query.call_args.kwargs["stay_id"], 7)
+        self.assertEqual(historical_status, 200)
+        self.assertEqual(historical_body["records"], [historical_record])
+        historical_query.assert_called_once()
+
     def test_category_and_date_filters(self) -> None:
         first_time = datetime(2026, 11, 7, 10, tzinfo=timezone.utc)
         second_time = datetime(2026, 11, 7, 12, tzinfo=timezone.utc)

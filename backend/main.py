@@ -2,6 +2,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime
 import os
+from typing import Literal
 from uuid import UUID
 
 from services.serial_service import serial_monitor
@@ -13,6 +14,18 @@ from services.clinical_records import (
     ClinicalRecordStore,
     ClinicalRecordUpdate,
     ClinicalRecordVoid,
+)
+from services.patient_service import (
+    DeviceAssign,
+    DeviceCreate,
+    DeviceUnassign,
+    IcuStayCreate,
+    IcuStayDischarge,
+    IcuStayUpdate,
+    PatientCreate,
+    PatientStore,
+    PatientUpdate,
+    TelemetryIngest,
 )
 
 import pandas as pd
@@ -36,6 +49,7 @@ CLINICAL_DB_FILE = (
 if not CLINICAL_DB_FILE.is_absolute():
     CLINICAL_DB_FILE = ROOT / CLINICAL_DB_FILE
 clinical_record_store = ClinicalRecordStore(CLINICAL_DB_FILE)
+patient_store = PatientStore(CLINICAL_DB_FILE)
 
 
 # ============================================================
@@ -48,7 +62,9 @@ async def lifespan(app: FastAPI):
     print("Loading Smart-ICU historical dataset...")
     df = load_dataset()
     print(f"Loaded {len(df):,} patient-hour rows from {df['patientunitstayid'].nunique():,} ICU stays.")
+    patient_store.initialize()
     clinical_record_store.initialize()
+    serial_monitor.set_on_reading(patient_store.ingest_reading)
     serial_monitor.start()
     try:
         yield
@@ -58,7 +74,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Smart ICU Patient Safety System",
     description="Research prototype: historical eICU analytics and live ESP32 telemetry",
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan
 )
 
@@ -142,6 +158,12 @@ def require_patient(
     patientunitstayid: int
 ) -> pd.DataFrame:
 
+    if df is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Historical patient dataset is not loaded.",
+        )
+
     patient_df = df[
         df["patientunitstayid"]
         == patientunitstayid
@@ -194,25 +216,42 @@ def health_check():
 
 @app.get("/api/hardware/telemetry")
 def get_hardware_telemetry():
-    """Latest parsed ESP32 reading; this is not linked to an eICU patient."""
-    return serial_monitor.snapshot()
+    """Latest parsed ESP32 reading with active assignment information."""
+    snapshot = serial_monitor.snapshot()
+    device_id = getattr(serial_monitor, "device_id", "ESP32-001")
+    assignment = patient_store.get_active_assignment_for_device(device_id)
+    if assignment:
+        snapshot["assigned"] = True
+        snapshot["assignment"] = assignment
+    else:
+        snapshot["assigned"] = False
+        snapshot["assignment"] = None
+    return snapshot
 
 
 # ============================================================
 # MANUALLY ENTERED CLINICAL RECORDS
 # ============================================================
 
-def require_existing_stay(patientunitstayid: int) -> None:
+def require_existing_stay(stay_ref: int | str) -> None:
+    stay = patient_store.get_stay(stay_ref)
+    if stay is not None:
+        return
     if df is None:
         raise HTTPException(
             status_code=503,
             detail="Historical patient dataset is not loaded.",
         )
-    if not (df["patientunitstayid"] == patientunitstayid).any():
-        raise HTTPException(
-            status_code=404,
-            detail=f"ICU patient stay {patientunitstayid} not found.",
-        )
+    try:
+        stay_id_int = int(stay_ref)
+        if (df["patientunitstayid"] == stay_id_int).any():
+            return
+    except (ValueError, TypeError):
+        pass
+    raise HTTPException(
+        status_code=404,
+        detail=f"ICU patient stay {stay_ref} not found.",
+    )
 
 
 def validate_clinical_date_range(
@@ -264,30 +303,275 @@ def get_clinical_record_patient_stays(
 
 @app.post("/api/clinical-records", status_code=201)
 def create_clinical_record(record: ClinicalRecordCreate):
-    require_existing_stay(record.patientunitstayid)
-    return clinical_record_store.create(record)
+    if record.stay_id is not None and record.patientunitstayid is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot provide both historical patientunitstayid and registered stay_id.",
+        )
+
+    if record.stay_id is not None:
+        stay = patient_store.get_stay(record.stay_id)
+        if not stay:
+            raise HTTPException(status_code=404, detail=f"ICU stay '{record.stay_id}' not found.")
+        if stay["discharge_status"] != "active":
+            raise HTTPException(status_code=400, detail="Cannot add clinical records to a discharged ICU stay.")
+        if record.patient_id is not None:
+            pat = patient_store.get_patient(record.patient_id)
+            if not pat:
+                raise HTTPException(status_code=404, detail=f"Patient '{record.patient_id}' not found.")
+            if stay["patient_id"] != record.patient_id:
+                raise HTTPException(status_code=400, detail="ICU stay does not belong to the specified patient.")
+        else:
+            record.patient_id = stay["patient_id"]
+        # Strictly ensure historical identifier is None for registered admission records
+        record.patientunitstayid = None
+    elif record.patientunitstayid is not None:
+        if record.patient_id is not None or record.stay_id is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Historical clinical records cannot specify registered patient_id or stay_id.",
+            )
+        require_existing_stay(record.patientunitstayid)
+        record.stay_id = None
+        record.patient_id = None
+    else:
+        raise HTTPException(status_code=422, detail="Either stay_id or patientunitstayid is required.")
+
+    try:
+        return clinical_record_store.create(record)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
-@app.get("/api/patients/{patientunitstayid}/clinical-records")
+@app.get("/api/patients/{patient_ref}/clinical-records")
 def get_patient_clinical_records(
-    patientunitstayid: int,
+    patient_ref: int | str,
+    source: Literal["registered", "historical"] | None = Query(default=None),
+    category: ClinicalCategory | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    include_voided: bool = False,
+    stay_id: int | None = None,
+):
+    validate_clinical_date_range(start_time, end_time)
+    ref_str = str(patient_ref).strip()
+
+    if source == "registered":
+        registered_patient = patient_store.get_patient(patient_ref)
+        if not registered_patient:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Registered patient '{patient_ref}' not found.",
+            )
+        return {
+            "patient_id": registered_patient["id"],
+            "patient_code": registered_patient["patient_code"],
+            "records": clinical_record_store.list_for_patient_id(
+                registered_patient["id"],
+                category=category,
+                start_time=start_time,
+                end_time=end_time,
+                include_voided=include_voided,
+                stay_id=stay_id,
+            ),
+        }
+
+    if source == "historical":
+        try:
+            stay_id_int = int(patient_ref)
+        except (ValueError, TypeError) as error:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Historical ICU stay '{patient_ref}' not found.",
+            ) from error
+        if df is None or not (df["patientunitstayid"] == stay_id_int).any():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Historical ICU stay '{patient_ref}' not found.",
+            )
+        return {
+            "patientunitstayid": stay_id_int,
+            "records": clinical_record_store.list_for_patient(
+                stay_id_int,
+                category=category,
+                start_time=start_time,
+                end_time=end_time,
+                include_voided=include_voided,
+            ),
+        }
+
+    # If source is None:
+    if not ref_str.isdigit() and not (ref_str.startswith("-") and ref_str[1:].isdigit()):
+        # Alphanumeric code (e.g. "P001") -> unambiguously registered patient
+        registered_patient = patient_store.get_patient(patient_ref)
+        if registered_patient:
+            return {
+                "patient_id": registered_patient["id"],
+                "patient_code": registered_patient["patient_code"],
+                "records": clinical_record_store.list_for_patient_id(
+                    registered_patient["id"],
+                    category=category,
+                    start_time=start_time,
+                    end_time=end_time,
+                    include_voided=include_voided,
+                    stay_id=stay_id,
+                ),
+            }
+        raise HTTPException(status_code=404, detail=f"Registered patient '{patient_ref}' not found.")
+
+    # Numeric identifier without explicit source: check ambiguity
+    num_id = int(ref_str)
+    reg_patient = patient_store.get_patient(num_id)
+    has_historical = df is not None and (df["patientunitstayid"] == num_id).any()
+
+    if reg_patient is not None and has_historical:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Identifier '{patient_ref}' is ambiguous: exists as both registered patient "
+                f"'{reg_patient['patient_code']}' (ID {reg_patient['id']}) and historical eICU stay. "
+                "Specify query parameter '?source=registered' or '?source=historical'."
+            ),
+        )
+    if reg_patient is not None:
+        return {
+            "patient_id": reg_patient["id"],
+            "patient_code": reg_patient["patient_code"],
+            "records": clinical_record_store.list_for_patient_id(
+                reg_patient["id"],
+                category=category,
+                start_time=start_time,
+                end_time=end_time,
+                include_voided=include_voided,
+                stay_id=stay_id,
+            ),
+        }
+    if has_historical:
+        return {
+            "patientunitstayid": num_id,
+            "records": clinical_record_store.list_for_patient(
+                num_id,
+                category=category,
+                start_time=start_time,
+                end_time=end_time,
+                include_voided=include_voided,
+            ),
+        }
+
+    raise HTTPException(status_code=404, detail=f"Patient or historical stay '{patient_ref}' not found.")
+
+
+@app.get("/api/stays/{stay_ref}/clinical-records")
+def get_stay_clinical_records(
+    stay_ref: str,
+    source: Literal["registered", "historical"] | None = Query(default=None),
     category: ClinicalCategory | None = None,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
     include_voided: bool = False,
 ):
-    require_existing_stay(patientunitstayid)
     validate_clinical_date_range(start_time, end_time)
-    return {
-        "patientunitstayid": patientunitstayid,
-        "records": clinical_record_store.list_for_patient(
-            patientunitstayid,
+    ref_str = str(stay_ref).strip()
+
+    if source == "registered":
+        stay = patient_store.get_stay(stay_ref)
+        if not stay:
+            raise HTTPException(status_code=404, detail=f"ICU stay '{stay_ref}' not found.")
+        records = clinical_record_store.list_for_stay_id(
+            stay["id"],
             category=category,
             start_time=start_time,
             end_time=end_time,
             include_voided=include_voided,
-        ),
-    }
+        )
+        return {
+            "stay_id": stay["id"],
+            "stay_code": stay["stay_code"],
+            "patient_id": stay["patient_id"],
+            "records": records,
+        }
+
+    if source == "historical":
+        try:
+            stay_id_int = int(stay_ref)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Historical ICU stay '{stay_ref}' not found.",
+            ) from error
+        if df is None or not (df["patientunitstayid"] == stay_id_int).any():
+            raise HTTPException(status_code=404, detail=f"Historical ICU stay '{stay_ref}' not found.")
+        return {
+            "patientunitstayid": stay_id_int,
+            "records": clinical_record_store.list_for_patient(
+                stay_id_int,
+                category=category,
+                start_time=start_time,
+                end_time=end_time,
+                include_voided=include_voided,
+            ),
+        }
+
+    # If source is None:
+    if not ref_str.isdigit():
+        stay = patient_store.get_stay(stay_ref)
+        if not stay:
+            raise HTTPException(status_code=404, detail=f"ICU stay '{stay_ref}' not found.")
+        records = clinical_record_store.list_for_stay_id(
+            stay["id"],
+            category=category,
+            start_time=start_time,
+            end_time=end_time,
+            include_voided=include_voided,
+        )
+        return {
+            "stay_id": stay["id"],
+            "stay_code": stay["stay_code"],
+            "patient_id": stay["patient_id"],
+            "records": records,
+        }
+
+    stay_id_int = int(ref_str)
+    reg_stay = patient_store.get_stay(stay_id_int)
+    has_historical = df is not None and (df["patientunitstayid"] == stay_id_int).any()
+
+    if reg_stay is not None and has_historical:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Stay identifier '{stay_ref}' is ambiguous: exists as both registered stay "
+                f"'{reg_stay['stay_code']}' (ID {reg_stay['id']}) and historical eICU stay. "
+                "Specify query parameter '?source=registered' or '?source=historical'."
+            ),
+        )
+    if reg_stay is not None:
+        records = clinical_record_store.list_for_stay_id(
+            reg_stay["id"],
+            category=category,
+            start_time=start_time,
+            end_time=end_time,
+            include_voided=include_voided,
+        )
+        return {
+            "stay_id": reg_stay["id"],
+            "stay_code": reg_stay["stay_code"],
+            "patient_id": reg_stay["patient_id"],
+            "records": records,
+        }
+    if has_historical:
+        return {
+            "patientunitstayid": stay_id_int,
+            "records": clinical_record_store.list_for_patient(
+                stay_id_int,
+                category=category,
+                start_time=start_time,
+                end_time=end_time,
+                include_voided=include_voided,
+            ),
+        }
+    raise HTTPException(status_code=404, detail=f"ICU stay '{stay_ref}' not found.")
 
 
 @app.get("/api/clinical-records/{record_id}/revisions")
@@ -438,21 +722,301 @@ def get_summary():
 
 
 # ============================================================
-# PATIENT LIST
+# PATIENTS & ADMISSIONS (REGISTERED)
+# ============================================================
+
+@app.post("/api/patients", status_code=201)
+def create_patient(patient: PatientCreate):
+    try:
+        return patient_store.create_patient(patient)
+    except ValueError as err:
+        msg = str(err)
+        raise HTTPException(
+            status_code=409 if "already exists" in msg else 400,
+            detail=msg,
+        )
+
+
+@app.get("/api/registered-patients")
+def get_registered_patients(
+    search: str | None = Query(default=None),
+    status: str | None = Query(default="all"),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    return patient_store.list_patients(
+        search=search,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/api/registered-patients/{patient_ref}")
+def get_registered_patient(patient_ref: str):
+    patient = patient_store.get_patient(patient_ref)
+    if not patient:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Registered patient '{patient_ref}' not found.",
+        )
+    return patient
+
+
+@app.patch("/api/patients/{patient_ref}")
+def update_patient(patient_ref: str, fields: PatientUpdate):
+    try:
+        updated = patient_store.update_patient(patient_ref, fields)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+    if not updated:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Patient '{patient_ref}' not found.",
+        )
+    return updated
+
+
+@app.post("/api/patients/{patient_ref}/archive")
+def archive_patient(patient_ref: str):
+    archived = patient_store.archive_patient(patient_ref)
+    if not archived:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Patient '{patient_ref}' not found.",
+        )
+    return archived
+
+
+@app.delete("/api/patients/{patient_ref}")
+def delete_patient(patient_ref: str):
+    try:
+        deleted = patient_store.delete_patient(patient_ref)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Patient '{patient_ref}' not found.",
+        )
+    return {"status": "deleted", "patient_id": patient_ref}
+
+
+# ============================================================
+# ICU STAYS / ADMISSIONS
+# ============================================================
+
+@app.post("/api/patients/{patient_ref}/stays", status_code=201)
+def create_patient_stay(patient_ref: str, fields: IcuStayCreate):
+    try:
+        return patient_store.create_stay(patient_ref, fields)
+    except KeyError as err:
+        raise HTTPException(status_code=404, detail=str(err).strip("'"))
+    except ValueError as err:
+        msg = str(err)
+        status_code = 409 if "already has an active ICU admission" in msg or "already exists" in msg else 400
+        raise HTTPException(status_code=status_code, detail=msg)
+
+
+@app.get("/api/patients/{patient_ref}/stays")
+def list_patient_stays(patient_ref: str):
+    try:
+        return {
+            "patient_ref": patient_ref,
+            "stays": patient_store.list_stays_for_patient(patient_ref),
+        }
+    except KeyError as err:
+        raise HTTPException(status_code=404, detail=str(err).strip("'"))
+
+
+@app.get("/api/stays/{stay_ref}")
+def get_stay(stay_ref: str):
+    stay = patient_store.get_stay(stay_ref)
+    if not stay:
+        raise HTTPException(
+            status_code=404,
+            detail=f"ICU stay '{stay_ref}' not found.",
+        )
+    return stay
+
+
+@app.patch("/api/stays/{stay_ref}")
+def update_stay(stay_ref: str, fields: IcuStayUpdate):
+    updated = patient_store.update_stay(stay_ref, fields)
+    if not updated:
+        raise HTTPException(
+            status_code=404,
+            detail=f"ICU stay '{stay_ref}' not found.",
+        )
+    return updated
+
+
+@app.post("/api/stays/{stay_ref}/discharge")
+def discharge_stay(stay_ref: str, fields: IcuStayDischarge = Body(default_factory=IcuStayDischarge)):
+    try:
+        return patient_store.discharge_stay(
+            stay_ref,
+            discharge_datetime=fields.discharge_datetime,
+            discharge_status=fields.discharge_status,
+        )
+    except KeyError as err:
+        raise HTTPException(status_code=404, detail=str(err).strip("'"))
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+
+
+# ============================================================
+# DEVICES & ASSIGNMENTS
+# ============================================================
+
+@app.post("/api/devices", status_code=201)
+def register_device(device: DeviceCreate):
+    try:
+        return patient_store.register_device(device)
+    except ValueError as err:
+        raise HTTPException(status_code=409, detail=str(err))
+
+
+@app.get("/api/devices")
+def list_devices():
+    return {"devices": patient_store.list_devices()}
+
+
+@app.get("/api/devices/{device_id}")
+def get_device(device_id: str):
+    dev = patient_store.get_device(device_id)
+    if not dev:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Device '{device_id}' not found.",
+        )
+    return dev
+
+
+@app.post("/api/devices/{device_id}/assign")
+def assign_device(device_id: str, payload: DeviceAssign):
+    try:
+        return patient_store.assign_device(
+            device_id=device_id,
+            patient_ref=payload.patient_id,
+            stay_ref=payload.stay_id,
+        )
+    except KeyError as err:
+        raise HTTPException(status_code=404, detail=str(err).strip("'"))
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+
+
+@app.post("/api/devices/{device_id}/unassign")
+def unassign_device(device_id: str, payload: DeviceUnassign = Body(default_factory=DeviceUnassign)):
+    try:
+        return patient_store.unassign_device(device_id=device_id, reason=payload.reason)
+    except KeyError as err:
+        raise HTTPException(status_code=404, detail=str(err).strip("'"))
+
+
+@app.get("/api/devices/{device_id}/assignments")
+def list_device_assignments(device_id: str):
+    dev = patient_store.get_device(device_id)
+    if not dev:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Device '{device_id}' not found.",
+        )
+    return {
+        "device_id": device_id,
+        "assignments": patient_store.list_device_assignments(device_id),
+    }
+
+
+# ============================================================
+# PATIENT TELEMETRY & TIMELINE
+# ============================================================
+
+@app.get("/api/patients/{patient_ref}/telemetry")
+def get_patient_telemetry(
+    patient_ref: str,
+    limit: int = Query(default=100, ge=1, le=1000),
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+):
+    try:
+        return {
+            "patient_ref": patient_ref,
+            "telemetry": patient_store.get_patient_telemetry(
+                patient_ref,
+                limit=limit,
+                start_time=start_time,
+                end_time=end_time,
+            ),
+        }
+    except KeyError as err:
+        raise HTTPException(status_code=404, detail=str(err).strip("'"))
+
+
+@app.get("/api/stays/{stay_ref}/telemetry")
+def get_stay_telemetry(
+    stay_ref: str,
+    limit: int = Query(default=100, ge=1, le=1000),
+):
+    try:
+        return {
+            "stay_ref": stay_ref,
+            "telemetry": patient_store.get_stay_telemetry(stay_ref, limit=limit),
+        }
+    except KeyError as err:
+        raise HTTPException(status_code=404, detail=str(err).strip("'"))
+
+
+@app.post("/api/devices/{device_id}/telemetry", status_code=201)
+def inject_device_telemetry(device_id: str, reading: TelemetryIngest):
+    """
+    Ingest or simulate incoming telemetry for a device.
+    Associates reading with patient and stay strictly based on active backend assignment.
+    """
+    reading_dict = reading.model_dump()
+    return patient_store.ingest_reading(device_id, reading_dict)
+
+
+@app.get("/api/patients/{patient_ref}/timeline")
+def get_patient_timeline(patient_ref: str):
+    try:
+        return patient_store.get_patient_timeline(patient_ref)
+    except KeyError as err:
+        raise HTTPException(status_code=404, detail=str(err).strip("'"))
+
+
+# ============================================================
+# HISTORICAL EICU PATIENT LIST & LEGACY LOOKUP
 # ============================================================
 
 @app.get("/api/patients")
 def get_patients(
-    priority: str | None = Query(
-        default=None
-    ),
-    limit: int = Query(
-        default=50,
-        ge=1,
-        le=500
-    )
+    priority: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+    source: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
 ):
+    if patient_store.database_path != clinical_record_store.database_path:
+        patient_store.database_path = clinical_record_store.database_path
 
+    # Route to registered patients if explicitly requested or searching
+    is_registered = (
+        (isinstance(source, str) and source == "registered")
+        or (isinstance(search, str) and bool(search.strip()))
+        or (isinstance(status, str) and status in ("active", "archived", "all"))
+    )
+    if is_registered:
+        return patient_store.list_patients(
+            search=search if isinstance(search, str) else None,
+            status=status if isinstance(status, str) else "all",
+            limit=limit if isinstance(limit, int) else 100,
+            offset=offset if isinstance(offset, int) else 0,
+        )
+
+    # Otherwise return historical eICU dataset
     if df is None:
         raise HTTPException(
             status_code=503,
@@ -467,10 +1031,13 @@ def get_patients(
         "critical"
     }
 
-    if priority:
-        priority = priority.lower()
+    priority_val = priority if isinstance(priority, str) else None
+    limit_val = limit if isinstance(limit, int) else 50
 
-        if priority not in valid_priorities:
+    if priority_val:
+        priority_val = priority_val.lower()
+
+        if priority_val not in valid_priorities:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -493,12 +1060,12 @@ def get_patients(
         .tail(1)
     )
 
-    if priority:
+    if priority_val:
         latest = latest[
             latest[
                 "final_alert_priority"
             ].str.lower()
-            == priority
+            == priority_val
         ]
 
     # Sort the patient list by alert severity
@@ -530,7 +1097,7 @@ def get_patients(
 
     patients = []
 
-    for _, row in latest.head(limit).iterrows():
+    for _, row in latest.head(limit_val).iterrows():
 
         patients.append({
             "patientunitstayid":
@@ -583,12 +1150,9 @@ def get_patients(
 
 
 # ============================================================
-# PATIENT HISTORY
+# PATIENT DETAIL / HISTORY
 # ============================================================
 
-@app.get(
-    "/api/patients/{patientunitstayid}"
-)
 def get_patient_history(
     patientunitstayid: int,
     limit: int = Query(
@@ -597,7 +1161,6 @@ def get_patient_history(
         le=2000
     )
 ):
-
     patient_df = require_patient(
         patientunitstayid
     )
@@ -611,139 +1174,91 @@ def get_patient_history(
     records = []
 
     for _, row in patient_df.iterrows():
-
         records.append({
-
-            "patientunitstayid":
-                int(
-                    row["patientunitstayid"]
-                ),
-
-            "hour":
-                float(row["hour"]),
-
-            "heart_rate":
-                clean_value(
-                    row["heart_rate"]
-                ),
-
-            "spo2":
-                clean_value(
-                    row["spo2"]
-                ),
-
-            "respiration":
-                clean_value(
-                    row["respiration"]
-                ),
-
-            "systolic_bp":
-                clean_value(
-                    row["systolic_bp"]
-                ),
-
-            "diastolic_bp":
-                clean_value(
-                    row["diastolic_bp"]
-                ),
-
-            "mean_bp":
-    clean_value(
-        row["mean_bp"]
-    ),
-
-"total_intake_ml":
-    clean_value(
-        row["total_intake_ml"]
-    ),
-
-"total_output_ml":
-    clean_value(
-        row["total_output_ml"]
-    ),
-
-"dialysis_ml":
-    clean_value(
-        row["dialysis_ml"]
-    ),
-
-"reported_net_ml":
-    clean_value(
-        row["reported_net_ml"]
-    ),
-
-"net_fluid_balance_ml":
-    clean_value(
-        row["net_fluid_balance_ml"]
-    ),
-
-"urine_output_ml":
-    clean_value(
-        row["urine_output_ml"]
-    ),
-
-            "active_infusion_count":
-                clean_value(
-                    row["active_infusion_count"]
-                ),
-
-            "vasoactive_support":
-                clean_value(
-                    row["vasoactive_support"]
-                ),
-
-            "anomaly_score":
-                clean_value(
-                    row["anomaly_score"]
-                ),
-
-            "ml_anomaly":
-                bool(
-                    row["ml_anomaly"]
-                ),
-
-            "risk_probability":
-                clean_value(
-                    row["risk_probability"]
-                ),
-
-            "risk_band":
-                row["risk_band"],
-
-            "clinical_rule_severity":
-                row[
-                    "clinical_rule_severity_v2"
-                ],
-
-            "clinical_explanation":
-                row[
-                    "clinical_rule_explanation_v2"
-                ],
-
-            "priority":
-                row[
-                    "final_alert_priority"
-                ],
-
-            "alert_category":
-                row[
-                    "alert_category"
-                ],
-
-            "final_explanation":
-                row[
-                    "final_alert_explanation"
-                ]
+            "patientunitstayid": int(row["patientunitstayid"]),
+            "hour": float(row["hour"]),
+            "heart_rate": clean_value(row["heart_rate"]),
+            "spo2": clean_value(row["spo2"]),
+            "respiration": clean_value(row["respiration"]),
+            "systolic_bp": clean_value(row["systolic_bp"]),
+            "diastolic_bp": clean_value(row["diastolic_bp"]),
+            "mean_bp": clean_value(row["mean_bp"]),
+            "total_intake_ml": clean_value(row["total_intake_ml"]),
+            "total_output_ml": clean_value(row["total_output_ml"]),
+            "dialysis_ml": clean_value(row["dialysis_ml"]),
+            "reported_net_ml": clean_value(row["reported_net_ml"]),
+            "net_fluid_balance_ml": clean_value(row["net_fluid_balance_ml"]),
+            "urine_output_ml": clean_value(row["urine_output_ml"]),
+            "active_infusion_count": clean_value(row["active_infusion_count"]),
+            "vasoactive_support": clean_value(row["vasoactive_support"]),
+            "anomaly_score": clean_value(row["anomaly_score"]),
+            "ml_anomaly": bool(row["ml_anomaly"]),
+            "risk_probability": clean_value(row["risk_probability"]),
+            "risk_band": row["risk_band"],
+            "clinical_rule_severity": row["clinical_rule_severity_v2"],
+            "clinical_explanation": row["clinical_rule_explanation_v2"],
+            "priority": row["final_alert_priority"],
+            "alert_category": row["alert_category"],
+            "final_explanation": row["final_alert_explanation"]
         })
 
     return {
-        "patientunitstayid":
-            patientunitstayid,
-
+        "patientunitstayid": patientunitstayid,
         "rows": len(records),
-
         "history": records
     }
+
+
+@app.get("/api/patients/{patient_ref}")
+def get_patient_detail_or_history(
+    patient_ref: str,
+    source: Literal["registered", "historical"] | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=2000),
+):
+    ref_str = str(patient_ref).strip()
+
+    if source == "registered":
+        patient = patient_store.get_patient(patient_ref)
+        if not patient:
+            raise HTTPException(status_code=404, detail=f"Registered patient '{patient_ref}' not found.")
+        return patient
+
+    if source == "historical":
+        try:
+            stay_id = int(patient_ref)
+        except ValueError:
+            raise HTTPException(status_code=404, detail=f"Historical eICU stay '{patient_ref}' not found.")
+        return get_patient_history(stay_id, limit=limit)
+
+    # If source is None:
+    if not ref_str.isdigit() and not (ref_str.startswith("-") and ref_str[1:].isdigit()):
+        patient = patient_store.get_patient(patient_ref)
+        if not patient:
+            raise HTTPException(status_code=404, detail=f"Registered patient '{patient_ref}' not found.")
+        return patient
+
+    # Numeric string without explicit source
+    num_id = int(ref_str)
+    reg_patient = patient_store.get_patient(num_id)
+    has_historical = df is not None and (df["patientunitstayid"] == num_id).any()
+
+    if reg_patient is not None and has_historical:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Identifier '{patient_ref}' is ambiguous: exists as both registered patient "
+                f"'{reg_patient['patient_code']}' (ID {reg_patient['id']}) and historical eICU stay. "
+                "Specify query parameter '?source=registered' or '?source=historical'."
+            ),
+        )
+
+    if reg_patient is not None:
+        return reg_patient
+
+    if has_historical:
+        return get_patient_history(num_id, limit=limit)
+
+    raise HTTPException(status_code=404, detail=f"Patient or historical stay '{patient_ref}' not found.")
 
 
 # ============================================================

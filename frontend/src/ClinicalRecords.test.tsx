@@ -68,6 +68,10 @@ describe("Clinical observations and laboratory records", () => {
           if (failHistory) return jsonResponse({ detail: "History unavailable" }, 503);
           return jsonResponse({ records: records.filter((item) => !item.voided) });
         }
+        if (url.includes("/api/stays/456/clinical-records")) {
+          if (failHistory) return jsonResponse({ detail: "History unavailable" }, 503);
+          return jsonResponse({ records: records.filter((item) => !item.voided) });
+        }
         if (
           url.includes("/api/clinical-records/") &&
           (!init?.method || init.method === "GET")
@@ -174,6 +178,66 @@ describe("Clinical observations and laboratory records", () => {
     expect(payload.value).toBe(125);
     expect(payload.unit).toBe("mL");
     expect(payload.measurement_time).toMatch(/Z$/);
+  });
+
+  it("scopes embedded history directly to the selected registered stay", async () => {
+    render(
+      <ClinicalRecords
+        initialPatientId={123}
+        initialStayId={456}
+        patientName="Synthetic Patient"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(
+        requests.some((request) =>
+          request.url.includes("/api/stays/456/clinical-records"),
+        ),
+      ).toBe(true);
+    });
+
+    const historyRequest = requests.find((request) =>
+      request.url.includes("/api/stays/456/clinical-records"),
+    );
+    if (!historyRequest) throw new Error("Embedded clinical history request was not sent.");
+    const query = new URL(historyRequest.url).searchParams;
+    expect(historyRequest.url).not.toContain("/api/patients/");
+    expect(query.get("source")).toBeNull();
+  });
+
+  it("sends stay_id and patient_id without patientunitstayid for a registered admission", async () => {
+    render(
+      <ClinicalRecords
+        initialPatientId={123}
+        initialStayId={456}
+        patientName="Synthetic Patient"
+      />,
+    );
+
+    await screen.findByText(/Preselected ICU Admission/i);
+
+    fireEvent.change(screen.getByLabelText("Result / volume"), {
+      target: { value: "150" },
+    });
+    fireEvent.change(screen.getByLabelText("Operator identifier or display name"), {
+      target: { value: "Nurse Registered" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save clinical record" }));
+
+    expect(await screen.findByText("Clinical record saved.")).toBeInTheDocument();
+
+    const post = requests.find(
+      (request) =>
+        request.url.endsWith("/api/clinical-records") &&
+        request.init?.method === "POST",
+    );
+    expect(post).toBeDefined();
+    const payload = JSON.parse(String(post?.init?.body));
+    expect(payload.stay_id).toBe(456);
+    expect(payload.patient_id).toBe(123);
+    expect(payload.patientunitstayid).toBeUndefined();
+    expect(payload.value).toBe(150);
   });
 
   it("updates dynamic blood-test and other-lab fields and filters history", async () => {

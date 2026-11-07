@@ -1,10 +1,13 @@
 """Non-blocking ESP32 serial reader for TBP_final.ino."""
 from __future__ import annotations
+import logging
 import os, re, threading, time
 from datetime import datetime, timezone
 from typing import Any
 import serial
 from serial import SerialException
+
+logger = logging.getLogger(__name__)
 
 _NUMBER_PATTERN = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
 LINE_PATTERN = re.compile(
@@ -15,20 +18,64 @@ LINE_PATTERN = re.compile(
 )
 
 class SerialMonitor:
-    def __init__(self, port: str | None = None, baudrate: int = 115200):
+    def __init__(self, port: str | None = None, baudrate: int = 115200, device_id: str | None = None):
         self.port = port or os.getenv("SMART_ICU_SERIAL_PORT", "COM9")
         self.baudrate = int(os.getenv("SMART_ICU_BAUDRATE", baudrate))
+        self.device_id = device_id or os.getenv("SMART_ICU_DEVICE_ID", "ESP32-001")
+        self._on_reading_callback: Any = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._serial: serial.Serial | None = None
         self._data: dict[str, Any] = {
             "connected": False, "port": self.port, "baudrate": self.baudrate,
+            "device_id": self.device_id,
             "fluid_ml": None, "bpm": None, "spo2": None,
             "device_status": None, "connection_status": "DISCONNECTED",
             "last_update": None, "last_error": None,
             "validity": {"fluid": False, "bpm": False, "spo2": False}
         }
+
+    def set_on_reading(self, callback: Any) -> None:
+        self._on_reading_callback = callback
+
+    def simulate_reading(
+        self,
+        fluid_ml: float,
+        bpm: float,
+        spo2: float,
+        device_status: str = "NORMAL",
+        reading_time: str | None = None,
+    ) -> dict[str, Any]:
+        now_iso = reading_time or datetime.now(timezone.utc).isoformat()
+        validity = {"fluid": fluid_ml >= 0, "bpm": 40 <= bpm <= 200, "spo2": 70 <= spo2 <= 100}
+        reading_payload = {
+            "fluid_ml": fluid_ml,
+            "bpm": bpm,
+            "spo2": spo2,
+            "device_status": device_status.upper(),
+            "connection_status": "CONNECTED",
+            "reading_time": now_iso,
+            "validity": validity,
+        }
+        self._set(
+            connected=True, connection_status="CONNECTED", port=self.port,
+            device_id=self.device_id,
+            fluid_ml=fluid_ml, bpm=bpm, spo2=spo2, device_status=device_status.upper(),
+            last_update=now_iso, last_error=None,
+            validity=validity,
+        )
+        if self._on_reading_callback:
+            try:
+                return self._on_reading_callback(self.device_id, reading_payload)
+            except Exception as exc:
+                logger.exception(
+                    "Error in simulated reading callback for device '%s': %s",
+                    self.device_id,
+                    exc,
+                )
+                return reading_payload
+        return reading_payload
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive(): return
@@ -85,15 +132,38 @@ class SerialMonitor:
                     if not match: continue
                     fluid, bpm, spo2 = map(float, match.group(1, 2, 3))
                     device_status = match.group(4).upper()
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    validity = {"fluid": fluid >= 0, "bpm": 40 <= bpm <= 200, "spo2": 70 <= spo2 <= 100}
                     self._set(
                         connected=True, connection_status="CONNECTED", port=self.port,
+                        device_id=self.device_id,
                         fluid_ml=fluid, bpm=bpm, spo2=spo2, device_status=device_status,
-                        last_update=datetime.now(timezone.utc).isoformat(), last_error=None,
-                        validity={"fluid": fluid >= 0, "bpm": 40 <= bpm <= 200, "spo2": 70 <= spo2 <= 100}
+                        last_update=now_iso, last_error=None,
+                        validity=validity
                     )
+                    if self._on_reading_callback:
+                        try:
+                            self._on_reading_callback(self.device_id, {
+                                "fluid_ml": fluid,
+                                "bpm": bpm,
+                                "spo2": spo2,
+                                "device_status": device_status,
+                                "connection_status": "CONNECTED",
+                                "reading_time": now_iso,
+                                "validity": validity,
+                            })
+                        except Exception as exc:
+                            logger.exception(
+                                "Error in serial reading callback for device '%s': %s",
+                                self.device_id,
+                                exc,
+                            )
             except (SerialException, OSError) as exc:
                 self._set(connected=False, connection_status="DISCONNECTED", last_error=str(exc))
-                time.sleep(3)
+                if self._stop.wait(3.0):
+                    break
+                if self._stop.is_set():
+                    break
             finally:
                 if self._serial:
                     try:

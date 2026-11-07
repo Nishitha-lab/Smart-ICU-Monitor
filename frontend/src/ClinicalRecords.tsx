@@ -107,10 +107,35 @@ function localDateTimeInput(value: string | null | undefined) {
   return Number.isNaN(date.getTime()) ? "" : localDateTimeValue(date);
 }
 
-export default function ClinicalRecords() {
+export type ClinicalRecordsProps = {
+  initialPatientId?: number | string;
+  initialStayId?: number | string;
+  patientName?: string;
+  onRecordSaved?: () => void;
+};
+
+export default function ClinicalRecords(props: ClinicalRecordsProps = {}) {
   const [patientSearch, setPatientSearch] = useState("");
   const [patientIds, setPatientIds] = useState<number[]>([]);
-  const [selectedPatientId, setSelectedPatientId] = useState("");
+  const [selectedPatientId, setSelectedPatientId] = useState<string>(() =>
+    props.initialStayId
+      ? String(props.initialStayId)
+      : props.initialPatientId
+        ? String(props.initialPatientId)
+        : "",
+  );
+  const [prevInitialStayId, setPrevInitialStayId] = useState(props.initialStayId);
+  const [prevInitialPatientId, setPrevInitialPatientId] = useState(props.initialPatientId);
+
+  if (props.initialStayId !== prevInitialStayId || props.initialPatientId !== prevInitialPatientId) {
+    setPrevInitialStayId(props.initialStayId);
+    setPrevInitialPatientId(props.initialPatientId);
+    if (props.initialStayId) {
+      setSelectedPatientId(String(props.initialStayId));
+    } else if (props.initialPatientId) {
+      setSelectedPatientId(String(props.initialPatientId));
+    }
+  }
   const [patientLoading, setPatientLoading] = useState(false);
   const [patientError, setPatientError] = useState("");
   const [clinicalApiStatus, setClinicalApiStatus] = useState<
@@ -173,7 +198,14 @@ export default function ClinicalRecords() {
     return query.toString();
   }, [endDate, historyCategory, selectedPatientId, startDate]);
 
+  const historyEndpoint = props.initialStayId
+    ? `${API_BASE}/api/stays/${props.initialStayId}/clinical-records`
+    : `${API_BASE}/api/patients/${selectedPatientId}/clinical-records`;
+
   useEffect(() => {
+    if (props.initialStayId) {
+      return;
+    }
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
       setPatientLoading(true);
@@ -213,7 +245,7 @@ export default function ClinicalRecords() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [patientSearch]);
+  }, [patientSearch, props.initialStayId]);
 
   useEffect(() => {
     if (!selectedPatientId) {
@@ -226,7 +258,7 @@ export default function ClinicalRecords() {
       try {
         const suffix = historyQuery ? `?${historyQuery}` : "";
         const response = await fetch(
-          `${API_BASE}/api/patients/${selectedPatientId}/clinical-records${suffix}`,
+          `${historyEndpoint}${suffix}`,
           { signal: controller.signal },
         );
         if (!response.ok) {
@@ -252,7 +284,7 @@ export default function ClinicalRecords() {
     }
     void loadRecords();
     return () => controller.abort();
-  }, [historyQuery, selectedPatientId]);
+  }, [historyEndpoint, historyQuery, selectedPatientId]);
 
   useEffect(() => {
     if (voidingRecord) {
@@ -459,7 +491,7 @@ export default function ClinicalRecords() {
 
         const suffix = historyQuery ? `?${historyQuery}` : "";
         const historyResponse = await fetch(
-          `${API_BASE}/api/patients/${selectedPatientId}/clinical-records${suffix}`,
+          `${historyEndpoint}${suffix}`,
         );
         if (!historyResponse.ok) {
           throw new Error("Record voided, but the active history refresh failed.");
@@ -524,7 +556,16 @@ export default function ClinicalRecords() {
               expected_version: editingRecord.version,
               change_reason: changeReason.trim(),
             }
-          : { patientunitstayid: Number(selectedPatientId) }),
+          : props.initialStayId
+            ? {
+                stay_id: Number(props.initialStayId),
+                patient_id: props.initialPatientId
+                  ? Number(props.initialPatientId)
+                  : undefined,
+              }
+            : {
+                patientunitstayid: Number(selectedPatientId),
+              }),
       };
       const response = await fetch(
         editingRecord
@@ -554,6 +595,7 @@ export default function ClinicalRecords() {
       setSuccessMessage(
         editingRecord ? "Clinical record correction saved." : "Clinical record saved.",
       );
+      props.onRecordSaved?.();
       setEditingRecord(null);
       setValue("");
       setNotes("");
@@ -565,7 +607,7 @@ export default function ClinicalRecords() {
       setConflictRecordId(null);
       const query = historyQuery ? `?${historyQuery}` : "";
       const historyResponse = await fetch(
-        `${API_BASE}/api/patients/${selectedPatientId}/clinical-records${query}`,
+        `${historyEndpoint}${query}`,
       );
       if (!historyResponse.ok) {
         throw new Error("Record saved, but the history refresh failed.");
@@ -610,42 +652,73 @@ export default function ClinicalRecords() {
             Numeric limits are technical input safeguards, not clinical
             reference ranges or interpretation.
           </p>
-          <div className="clinical-patient-picker">
-            <label htmlFor="clinical-patient-search">Search existing ICU stay IDs</label>
-            <input
-              id="clinical-patient-search"
-              type="search"
-              inputMode="numeric"
-              value={patientSearch}
-              onChange={(event) => {
-                setPatientSearch(event.target.value);
-                setSelectedPatientId("");
-                setRecords([]);
-                setEditingRecord(null);
-              }}
-              placeholder="Enter all or part of a stay ID"
-            />
-            <label htmlFor="clinical-patient-id">Select ICU stay ID</label>
-            <select
-              id="clinical-patient-id"
-              required
-              value={selectedPatientId}
-              onChange={(event) => {
-                setSelectedPatientId(event.target.value);
-                setRecords([]);
-                setEditingRecord(null);
+          {props.initialStayId ? (
+            <div
+              className="clinical-preselected-stay-banner"
+              style={{
+                background: "#f0fdf4",
+                border: "1px solid #bbf7d0",
+                padding: "12px 14px",
+                borderRadius: "8px",
+                marginBottom: "14px",
               }}
             >
-              <option value="">Select an existing stay</option>
-              {patientIds.map((patientId) => (
-                <option key={patientId} value={patientId}>
-                  {patientId}
-                </option>
-              ))}
-            </select>
-            {patientLoading && <small>Searching stays…</small>}
-            {patientError && <p className="clinical-error" role="alert">{patientError}</p>}
-          </div>
+              <div
+                style={{
+                  color: "#166534",
+                  fontWeight: 700,
+                  fontSize: "14px",
+                  marginBottom: "4px",
+                }}
+              >
+                ✓ Preselected ICU Admission
+              </div>
+              <div style={{ color: "#1e293b", fontSize: "13px" }}>
+                <strong>Patient:</strong>{" "}
+                {props.patientName || `Patient ${props.initialPatientId || ""}`}
+              </div>
+              <div style={{ color: "#1e293b", fontSize: "13px" }}>
+                <strong>Stay ID:</strong> {props.initialStayId}
+              </div>
+            </div>
+          ) : (
+            <div className="clinical-patient-picker">
+              <label htmlFor="clinical-patient-search">Search existing ICU stay IDs</label>
+              <input
+                id="clinical-patient-search"
+                type="search"
+                inputMode="numeric"
+                value={patientSearch}
+                onChange={(event) => {
+                  setPatientSearch(event.target.value);
+                  setSelectedPatientId("");
+                  setRecords([]);
+                  setEditingRecord(null);
+                }}
+                placeholder="Enter all or part of a stay ID"
+              />
+              <label htmlFor="clinical-patient-id">Select ICU stay ID</label>
+              <select
+                id="clinical-patient-id"
+                required
+                value={selectedPatientId}
+                onChange={(event) => {
+                  setSelectedPatientId(event.target.value);
+                  setRecords([]);
+                  setEditingRecord(null);
+                }}
+              >
+                <option value="">Select an existing stay</option>
+                {patientIds.map((patientId) => (
+                  <option key={patientId} value={patientId}>
+                    {patientId}
+                  </option>
+                ))}
+              </select>
+              {patientLoading && <small>Searching stays…</small>}
+              {patientError && <p className="clinical-error" role="alert">{patientError}</p>}
+            </div>
+          )}
 
           <form onSubmit={saveRecord}>
             <label htmlFor="clinical-category">Category</label>

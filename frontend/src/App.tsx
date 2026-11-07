@@ -6,6 +6,8 @@ import {
 } from "react";
 import "./App.css";
 import ClinicalRecords from "./ClinicalRecords";
+import PatientManagement from "./PatientManagement";
+import DeviceManagement from "./DeviceManagement";
 import { API_BASE } from "./api";
 
 type Summary = {
@@ -421,9 +423,9 @@ function TrendChart({
 function App() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [patients, setPatients] = useState<Patient[]>([]);
-  const [activeSection, setActiveSection] = useState<"dashboard" | "clinical">(
-    "dashboard",
-  );
+  const [activeSection, setActiveSection] = useState<
+    "dashboard" | "patients" | "clinical" | "devices"
+  >("dashboard");
   const [priorityFilter, setPriorityFilter] = useState("all");
 
   const [selectedPatientId, setSelectedPatientId] =
@@ -701,10 +703,24 @@ function App() {
         </button>
         <button
           type="button"
+          aria-current={activeSection === "patients" ? "page" : undefined}
+          onClick={() => setActiveSection("patients")}
+        >
+          Patients
+        </button>
+        <button
+          type="button"
           aria-current={activeSection === "clinical" ? "page" : undefined}
           onClick={() => setActiveSection("clinical")}
         >
           Clinical Observations &amp; Lab Results
+        </button>
+        <button
+          type="button"
+          aria-current={activeSection === "devices" ? "page" : undefined}
+          onClick={() => setActiveSection("devices")}
+        >
+          Device Management
         </button>
       </nav>
 
@@ -725,8 +741,16 @@ function App() {
           </div>
         )}
 
+        {activeSection === "patients" && (
+          <PatientManagement />
+        )}
+
         {activeSection === "clinical" && (
           <ClinicalRecords />
+        )}
+
+        {activeSection === "devices" && (
+          <DeviceManagement />
         )}
 
         {summary && !loading && !error && activeSection === "dashboard" && (

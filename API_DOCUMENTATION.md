@@ -1,73 +1,261 @@
-# API Documentation
+# API Documentation: Smart ICU Patient Safety System
 
-Base URL for the local development setup: `http://127.0.0.1:8000`.
-All data routes are read-only and use the precomputed
-`data/processed/smart_icu_final_alerts.csv`.
+Base URL: `http://127.0.0.1:8000`
 
-## `GET /`
+Interactive OpenAPI Documentation: `http://127.0.0.1:8000/docs`
 
-Returns system name, online status, and API version.
+> **Prototype security limitation:** API endpoints, including clinical-record routes, are unauthenticated. Caller-supplied `entered_by` values are not verified identities. Use only on localhost with synthetic data; public or shared-network deployment is prohibited until proper authentication, authorization, and audit-identity verification are implemented.
 
-## `GET /health`
+---
 
-Returns service status, whether the CSV dataset loaded, row count, and a
-hardware telemetry snapshot. Hardware fields may be null when disconnected or
-unavailable.
+## 1. System & Health
 
-## `GET /api/hardware/telemetry`
+### `GET /`
+Returns service name, online status, and version.
 
-Returns the latest serial telemetry snapshot separately from historical eICU
-records. The response includes connection state, port, timestamp, last error,
-measurement values, and per-field validity. A disconnected device does not
-produce fabricated zero readings.
+### `GET /health`
+Returns service health status, whether the eICU CSV dataset loaded, its row count, and the hardware telemetry status snapshot.
 
-## `GET /api/summary`
+### `GET /api/summary`
+Returns eICU triage cohort summary: total patient-hour rows, unique ICU stays, priority counts, anomaly and clinical counts, risk-threshold counts, and multi-signal alert count.
 
-Returns total patient-hour rows, unique ICU stays, priority counts, anomaly and
-clinical counts, risk-threshold counts, and multi-signal alert count.
+---
 
-## `GET /api/patients`
+## 2. Patients API
 
-Returns one latest hourly row per ICU stay, ordered by severity and risk.
+### `POST /api/patients`
+Registers a new patient in the hospital system.
+- **Request Body:**
+  ```json
+  {
+    "name": "Alice Walker",
+    "patient_code": "P001",
+    "age": 58,
+    "sex": "female",
+    "date_of_birth": "1968-04-12",
+    "contact_information": "+1-555-0101"
+  }
+  ```
+- **Responses:**
+  - `201 Created`: Returns created patient record.
+  - `400 Bad Request`: Blank name, duplicate `patient_code`, or invalid age (<0 or >130).
 
-| Query | Default | Constraints |
-|---|---:|---|
-| `priority` | omitted | `normal`, `low`, `moderate`, `high`, or `critical` |
-| `limit` | 50 | Integer from 1 through 500 |
+### `GET /api/patients`
+Lists ICU patients. Supports both live registered patients and historical eICU demo rows.
+- **Query Parameters:**
+  - `source=registered`: List registered patients from SQLite. Without this option, and without `search` or `status`, the endpoint returns the historical eICU patient list.
+  - `status`: `'active'`, `'archived'`, or `'all'`; providing this option selects the registered-patient list.
+  - `search`: Case-insensitive substring match against `name` and `patient_code`.
+  - `priority`: Optional historical eICU priority filter (`critical`, `high`, `moderate`, `low`, `normal`).
+  - `limit`: Maximum results (1-500, default 50).
 
-Priority filtering is applied after selecting each stay's latest row.
-Each returned item includes the stay ID, saved hour, final priority, alert
-category, risk probability/band, anomaly score/flag, clinical severity and
-explanation, and final explanation.
+### `GET /api/registered-patients/{patient_ref}`
+Retrieves complete profile for a registered patient, including:
+- Demographics and active status
+- Active ICU stay details
+- All historical ICU admissions
+- Active device assignment and hardware connection status
+- Complete device assignment history
+- Recent telemetry packet history
+- Latest vital signs (`fluid_ml`, `bpm`, `spo2`, `device_status`)
 
-An invalid priority returns HTTP 400. Invalid query types or bounds return
-FastAPI validation errors (HTTP 422).
+### `GET /api/patients/{patient_ref}`
+Unified patient / stay detail endpoint.
+- For patient codes (e.g., `P001`), resolves to the registered patient profile.
+- For integer IDs, resolves to the registered patient or historical eICU stay.
+- **Ambiguity Guard:** If an integer ID exists in both registered patients and historical eICU stays, the endpoint returns `HTTP 400 Bad Request` requiring an explicit `?source=registered` or `?source=historical` query parameter.
+- Invalid source query parameters return `HTTP 422 Unprocessable Entity`.
 
-## `GET /api/patients/{patientunitstayid}`
+### `PATCH /api/patients/{patient_ref}`
+Updates mutable demographic fields (`name`, `age`, `sex`, `date_of_birth`, `contact_information`).
 
-Returns chronological hourly history for one ICU stay. Unknown stay IDs return
-HTTP 404.
+### `POST /api/patients/{patient_ref}/archive`
+Archives a patient. An archived patient cannot receive new ICU admissions or device assignments, but all historical records remain intact.
 
-| Query | Default | Constraints |
-|---|---:|---|
-| `limit` | 200 | Integer from 1 through 2000 |
+### `DELETE /api/patients/{patient_ref}`
+Deletes a patient record.
+- **Guarded:** Returns `HTTP 400 Bad Request` if the patient has associated ICU stays, clinical records, or telemetry records.
 
-History items include available vital signs, fluid/context fields, risk,
-anomaly, clinical rule explanation, priority, category, and final explanation.
+---
 
-## `GET /api/patients/{patientunitstayid}/latest`
+## 3. ICU Admissions (Stays) API
 
-Returns the latest saved hour for a stay, grouped into vitals, fluid,
-treatment, and intelligence fields. Unknown stay IDs return HTTP 404.
+### `POST /api/patients/{patient_ref}/stays`
+Admits an active patient to the ICU.
+- **Request Body:**
+  ```json
+  {
+    "bed_number": "ICU-Bed-04",
+    "ward_or_unit": "Cardiothoracic ICU",
+    "admission_reason": "Post-op coronary artery bypass observation"
+  }
+  ```
+- **Responses:**
+  - `201 Created`: Returns created ICU stay with generated `stay_code` (e.g. `S001`).
+  - `400 Bad Request`: Patient is archived or already has an active ICU admission (`uq_active_patient_stay`).
 
-## Data and safety notes
+### `GET /api/patients/{patient_ref}/stays`
+Returns all historical and active ICU admission episodes for the patient.
 
-- This API does not perform ML inference; it serves saved CSV values.
-- Risk is associated with expired ICU discharge within 24 hours, not general
-  clinical deterioration.
-- Historical eICU data are not current patient observations.
-- Hardware telemetry is an independent optional stream and is not attached to
-  an eICU stay.
-- The local development CORS allowlist is limited to localhost/127.0.0.1 on
-  port 5173. The application is not configured as a public service.
-- No authentication, write API, or notification delivery API is implemented.
+### `GET /api/stays/{stay_ref}`
+Returns details for a specific stay by ID or stay code.
+
+### `PATCH /api/stays/{stay_ref}`
+Updates stay details (`bed_number`, `ward_or_unit`, `admission_reason`).
+
+### `POST /api/stays/{stay_ref}/discharge`
+Discharges an active ICU stay.
+- Sets `discharge_datetime = UTC now` and `discharge_status = 'discharged'`.
+- Automatically releases and unassigns any active bedside monitoring device.
+- Preserves all historical telemetry and clinical records.
+
+---
+
+## 4. Bedside Devices & Patient Assignment API
+
+### `POST /api/devices`
+Registers a bedside monitoring device.
+- **Request Body:**
+  ```json
+  {
+    "device_id": "ESP32-001",
+    "device_name": "ICU Bed 4 Monitor",
+    "connection_type": "serial",
+    "port": "COM9"
+  }
+  ```
+
+### `GET /api/devices`
+Returns all registered devices with hardware connection status, active patient assignment, and latest telemetry packet.
+
+### `POST /api/devices/{device_id}/assign`
+Explicitly assigns a device to an active patient and their active ICU stay.
+- **Request Body:**
+  ```json
+  {
+    "patient_id": 1,
+    "stay_id": 101
+  }
+  ```
+- **Validation:**
+  - Patient must exist and be active.
+  - ICU stay must exist, be active, and belong to the specified patient.
+  - Automatically terminates any previous active assignment for this device.
+- **Responses:**
+  - `200 OK`: Device assignment activated.
+  - `400 Bad Request`: Discharged stay, mismatched patient/stay, or inactive patient.
+
+### `POST /api/devices/{device_id}/unassign`
+Ends monitoring and releases the device from the patient.
+- Closes the active assignment with `unassigned_at = UTC now`.
+- Subsequent telemetry from this device is not attributed to any patient.
+
+### `GET /api/devices/{device_id}/assignments`
+Returns the chronological audit log of all historical patient assignments for this device.
+
+---
+
+## 5. Telemetry & Timeline API
+
+### `POST /api/devices/{device_id}/telemetry`
+Ingests or simulates an incoming sensor reading packet.
+- **Request Body:**
+  ```json
+  {
+    "fluid_ml": 420.5,
+    "bpm": 76.0,
+    "spo2": 98.0,
+    "device_status": "NORMAL",
+    "reading_time": "2026-11-08T01:30:00Z"
+  }
+  ```
+- **Attribution Behavior:**
+  - If the device has an active assignment, the reading is saved with `patient_id` and `stay_id`.
+  - If the device is unassigned, `patient_id = NULL` and `stay_id = NULL`.
+  - Readings older than assignment start time are stored without patient attribution.
+- **Metric validity:** The backend derives validity from the values and ignores caller-supplied validity flags. Fluid values must be non-negative, BPM must be within the telemetry parser's technical bounds of 40–200, and SpO₂ must be within its technical bounds of 70–100. These are data-quality bounds, not clinical reference ranges. Raw values remain stored for traceability; invalid metric fields are returned as `null` with validity metadata in telemetry views.
+
+### `GET /api/patients/{patient_ref}/telemetry?limit=100`
+Returns chronological telemetry readings attributed to this patient.
+
+### `GET /api/stays/{stay_ref}/telemetry?limit=100`
+Returns telemetry readings attributed to a specific ICU admission.
+
+### `GET /api/patients/{patient_ref}/timeline`
+Returns an auditable unified chronological timeline of all events for a patient:
+- Patient registration
+- ICU admission and discharge events
+- Bedside device assignments and unassignments
+- Clinical observation and laboratory records
+- Sensor alerts
+
+---
+
+## 6. Clinical Records & Observations API
+
+### `POST /api/clinical-records`
+Creates an audited clinical observation or laboratory record. The category must be `urine_output`, `blood_test`, `other_lab`, or `clinical_observation`.
+
+**Identifier Integrity Rules:**
+- **Registered ICU Admission:** Send `stay_id` and optional `patient_id`. Do **NOT** send `patientunitstayid`. The stay must be active and must belong to the patient.
+- **Historical eICU Admission:** Send `patientunitstayid` only. Do **NOT** send `patient_id` or `stay_id`.
+- **Rejection Policy:** Supplying both `patientunitstayid` and `stay_id`/`patient_id` is strictly rejected with `HTTP 422 Unprocessable Entity`. Mismatched patient and stay identifiers are rejected with `HTTP 400 Bad Request`. Discharged stays are rejected with `HTTP 400 Bad Request`. Nonexistent patients or stays are rejected with `HTTP 404 Not Found`.
+
+- **Request Body (Registered Admission):**
+  ```json
+  {
+    "patient_id": 1,
+    "stay_id": 101,
+    "category": "urine_output",
+    "measurement_name": "Urine output",
+    "value": 150.0,
+    "unit": "mL",
+    "measurement_time": "2026-11-08T01:00:00Z",
+    "entered_by": "Nurse J. Smith",
+    "observation_period": "1 hour"
+  }
+  ```
+
+- **Request Body (Historical eICU Record):**
+  ```json
+  {
+    "patientunitstayid": 242040,
+    "category": "urine_output",
+    "measurement_name": "Urine output",
+    "value": 85.0,
+    "unit": "mL",
+    "measurement_time": "2026-11-08T01:00:00Z",
+    "entered_by": "eICU Researcher"
+  }
+  ```
+
+### `GET /api/clinical-records/patient-stays`
+Searches historical eICU stay IDs by prefix. Supports `query` and `limit`.
+
+### `GET /api/patients/{patient_ref}/clinical-records`
+Retrieves clinical records for a patient with optional filters:
+- `category`: `urine_output`, `blood_test`, `other_lab`, or `clinical_observation`
+- `start_time`, `end_time`: ISO UTC filter bounds
+- `include_voided`: `true` or `false` (default: false)
+- `stay_id`: optional registered ICU stay filter
+- `source`: `registered` or `historical`; use this to disambiguate numeric registered patient IDs from historical eICU stay IDs. The default retains legacy numeric-ID lookup behavior.
+
+### `GET /api/stays/{stay_ref}/clinical-records`
+Retrieves records for a registered ICU stay, with the same category, time, and void filters.
+
+### `GET /api/clinical-records/{record_id}`
+Retrieves an individual record, including its current version and void status.
+
+### `GET /api/clinical-records/{record_id}/revisions`
+Retrieves preserved pre-correction snapshots and revision reasons.
+
+### `PUT /api/clinical-records/{record_id}`
+Updates/corrects an existing record.
+- Requires `expected_version` (optimistic concurrency locking).
+- Requires `change_reason` for clinical audit trail.
+- Preserves previous state in revision history.
+
+### `DELETE /api/clinical-records/{record_id}`
+Performs a reasoned clinical void.
+- Requires `expected_version`, `voided_by`, and `void_reason`.
+- Record remains stored with a void timestamp and audit reason; the response exposes `voided: true`. Voiding is not permanent deletion.

@@ -177,12 +177,28 @@ class ClinicalRecordFields(BaseModel):
 
 
 class ClinicalRecordCreate(ClinicalRecordFields):
-    patientunitstayid: Annotated[int, Field(gt=0)]
+    patientunitstayid: Annotated[int | None, Field(gt=0)] = None
+    patient_id: Annotated[int | None, Field(gt=0)] = None
+    stay_id: Annotated[int | None, Field(gt=0)] = None
+
+    @model_validator(mode="after")
+    def validate_reference(self) -> ClinicalRecordCreate:
+        if self.patientunitstayid is not None and (self.stay_id is not None or self.patient_id is not None):
+            raise ValueError(
+                "Historical identifier 'patientunitstayid' cannot be combined with registered 'stay_id' or 'patient_id'."
+            )
+        if self.patientunitstayid is None and self.stay_id is None:
+            raise ValueError(
+                "Either patientunitstayid (for historical eICU records) or stay_id (for registered ICU admissions) must be provided."
+            )
+        return self
 
 
 class ClinicalRecordUpdate(ClinicalRecordFields):
     expected_version: Annotated[int, Field(ge=1)]
     change_reason: Annotated[str, Field(min_length=1, max_length=500)]
+    patient_id: Annotated[int | None, Field(gt=0)] = None
+    stay_id: Annotated[int | None, Field(gt=0)] = None
 
     @field_validator("change_reason")
     @classmethod
@@ -222,6 +238,9 @@ class ClinicalRecordStore:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON;")
+        connection.execute("PRAGMA journal_mode = WAL;")
+        connection.execute("PRAGMA busy_timeout = 5000;")
         return connection
 
     @contextmanager
@@ -244,53 +263,197 @@ class ClinicalRecordStore:
         with self._connection() as connection:
             connection.execute(
                 """
-                CREATE TABLE IF NOT EXISTS clinical_records (
-                    record_id TEXT PRIMARY KEY,
-                    patientunitstayid INTEGER NOT NULL,
-                    category TEXT NOT NULL CHECK (
-                        category IN (
-                            'urine_output', 'blood_test',
-                            'other_lab', 'clinical_observation'
-                        )
-                    ),
-                    measurement_name TEXT NOT NULL,
-                    value_json TEXT NOT NULL,
-                    unit TEXT,
-                    measurement_time TEXT NOT NULL,
-                    entry_time TEXT NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
-                    entered_by TEXT NOT NULL,
-                    source TEXT NOT NULL CHECK (source = 'MANUAL_ENTRY'),
-                    notes TEXT,
-                    observation_period TEXT,
-                    reference_range TEXT,
-                    sample_collection_time TEXT,
-                    result_time TEXT,
-                    updated_at TEXT,
-                    voided_at TEXT,
-                    voided_by TEXT,
-                    void_reason TEXT
+                CREATE TABLE IF NOT EXISTS patients (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    patient_code TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    age INTEGER CHECK (age IS NULL OR (age >= 0 AND age <= 130)),
+                    sex TEXT CHECK (sex IS NULL OR sex IN ('male', 'female', 'other', 'unknown', 'Male', 'Female', 'Other', 'Unknown')),
+                    date_of_birth TEXT,
+                    contact_information TEXT,
+                    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 )
                 """
             )
-            columns = {
-                row["name"]
-                for row in connection.execute(
-                    "PRAGMA table_info(clinical_records)"
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_patients_code ON patients (patient_code);"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_patients_status ON patients (status);"
+            )
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS icu_stays (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stay_code TEXT NOT NULL UNIQUE,
+                    patient_id INTEGER NOT NULL REFERENCES patients (id) ON DELETE RESTRICT,
+                    admission_datetime TEXT NOT NULL,
+                    discharge_datetime TEXT,
+                    bed_number TEXT,
+                    ward_or_unit TEXT,
+                    admission_reason TEXT,
+                    discharge_status TEXT NOT NULL DEFAULT 'active' CHECK (discharge_status IN ('active', 'discharged', 'transferred')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 )
-            }
-            if "version" not in columns:
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_icu_stays_patient ON icu_stays (patient_id);"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_icu_stays_code ON icu_stays (stay_code);"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_icu_stays_status ON icu_stays (discharge_status);"
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_active_stay_per_patient
+                ON icu_stays (patient_id)
+                WHERE discharge_status = 'active';
+                """
+            )
+
+            # Check clinical_records table schema
+            table_check = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='clinical_records'"
+            ).fetchone()
+
+            if not table_check:
                 connection.execute(
                     """
-                    ALTER TABLE clinical_records
-                    ADD COLUMN version INTEGER NOT NULL DEFAULT 1
-                    CHECK (version >= 1)
+                    CREATE TABLE clinical_records (
+                        record_id TEXT PRIMARY KEY,
+                        patientunitstayid INTEGER,
+                        patient_id INTEGER REFERENCES patients(id) ON DELETE RESTRICT,
+                        stay_id INTEGER REFERENCES icu_stays(id) ON DELETE RESTRICT,
+                        category TEXT NOT NULL CHECK (
+                            category IN (
+                                'urine_output', 'blood_test',
+                                'other_lab', 'clinical_observation'
+                            )
+                        ),
+                        measurement_name TEXT NOT NULL,
+                        value_json TEXT NOT NULL,
+                        unit TEXT,
+                        measurement_time TEXT NOT NULL,
+                        entry_time TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+                        entered_by TEXT NOT NULL,
+                        source TEXT NOT NULL CHECK (source = 'MANUAL_ENTRY'),
+                        notes TEXT,
+                        observation_period TEXT,
+                        reference_range TEXT,
+                        sample_collection_time TEXT,
+                        result_time TEXT,
+                        updated_at TEXT,
+                        voided_at TEXT,
+                        voided_by TEXT,
+                        void_reason TEXT,
+                        CHECK (patientunitstayid IS NOT NULL OR stay_id IS NOT NULL)
+                    )
                     """
                 )
+            else:
+                table_info = connection.execute(
+                    "PRAGMA table_info(clinical_records)"
+                ).fetchall()
+                col_map = {row["name"]: dict(row) for row in table_info}
+
+                pus_col = col_map.get("patientunitstayid", {})
+                is_pus_not_null = pus_col.get("notnull", 0) == 1
+                has_patient_id = "patient_id" in col_map
+                has_stay_id = "stay_id" in col_map
+
+                fk_list = connection.execute(
+                    "PRAGMA foreign_key_list(clinical_records)"
+                ).fetchall()
+                fk_tables = {row["table"] for row in fk_list}
+                has_fks = "patients" in fk_tables and "icu_stays" in fk_tables
+
+                if "version" not in col_map or is_pus_not_null or not has_patient_id or not has_stay_id or not has_fks:
+                    connection.execute("PRAGMA foreign_keys = OFF;")
+                    connection.execute(
+                        """
+                        CREATE TABLE clinical_records_migration_tmp (
+                            record_id TEXT PRIMARY KEY,
+                            patientunitstayid INTEGER,
+                            patient_id INTEGER REFERENCES patients(id) ON DELETE RESTRICT,
+                            stay_id INTEGER REFERENCES icu_stays(id) ON DELETE RESTRICT,
+                            category TEXT NOT NULL CHECK (
+                                category IN (
+                                    'urine_output', 'blood_test',
+                                    'other_lab', 'clinical_observation'
+                                )
+                            ),
+                            measurement_name TEXT NOT NULL,
+                            value_json TEXT NOT NULL,
+                            unit TEXT,
+                            measurement_time TEXT NOT NULL,
+                            entry_time TEXT NOT NULL,
+                            version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+                            entered_by TEXT NOT NULL,
+                            source TEXT NOT NULL CHECK (source = 'MANUAL_ENTRY'),
+                            notes TEXT,
+                            observation_period TEXT,
+                            reference_range TEXT,
+                            sample_collection_time TEXT,
+                            result_time TEXT,
+                            updated_at TEXT,
+                            voided_at TEXT,
+                            voided_by TEXT,
+                            void_reason TEXT,
+                            CHECK (patientunitstayid IS NOT NULL OR stay_id IS NOT NULL)
+                        );
+                        """
+                    )
+                    col_names = set(col_map.keys())
+                    p_id_expr = "patient_id" if "patient_id" in col_names else "NULL"
+                    s_id_expr = "stay_id" if "stay_id" in col_names else "NULL"
+                    v_expr = "version" if "version" in col_names else "1"
+
+                    connection.execute(
+                        f"""
+                        INSERT INTO clinical_records_migration_tmp (
+                            record_id, patientunitstayid, patient_id, stay_id, category, measurement_name,
+                            value_json, unit, measurement_time, entry_time, version, entered_by,
+                            source, notes, observation_period, reference_range,
+                            sample_collection_time, result_time, updated_at, voided_at, voided_by, void_reason
+                        )
+                        SELECT
+                            record_id, patientunitstayid, {p_id_expr}, {s_id_expr}, category, measurement_name,
+                            value_json, unit, measurement_time, entry_time, {v_expr}, entered_by,
+                            source, notes, observation_period, reference_range,
+                            sample_collection_time, result_time, updated_at, voided_at, voided_by, void_reason
+                        FROM clinical_records;
+                        """
+                    )
+                    connection.execute("DROP TABLE clinical_records;")
+                    connection.execute(
+                        "ALTER TABLE clinical_records_migration_tmp RENAME TO clinical_records;"
+                    )
+                    connection.execute("PRAGMA foreign_keys = ON;")
+
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS clinical_records_patient_time
                 ON clinical_records (patientunitstayid, measurement_time)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS clinical_records_patient_id
+                ON clinical_records (patient_id, measurement_time)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS clinical_records_stay_id
+                ON clinical_records (stay_id, measurement_time)
                 """
             )
             connection.execute(
@@ -311,6 +474,10 @@ class ClinicalRecordStore:
         record = dict(row)
         record["value"] = json.loads(record.pop("value_json"))
         record["voided"] = record["voided_at"] is not None
+        if "patient_id" not in record:
+            record["patient_id"] = None
+        if "stay_id" not in record:
+            record["stay_id"] = None
         return record
 
     @staticmethod
@@ -335,18 +502,70 @@ class ClinicalRecordStore:
         record_id = str(uuid.uuid4())
         entry_time = datetime.now(timezone.utc).isoformat()
         values = self._values(fields)
-        with self._connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO clinical_records (
-                    record_id, patientunitstayid, category, measurement_name,
-                    value_json, unit, measurement_time, entry_time, entered_by,
-                    source, notes, observation_period, reference_range,
-                    sample_collection_time, result_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'MANUAL_ENTRY', ?, ?, ?, ?, ?)
-                """,
-                (record_id, fields.patientunitstayid, *values[:5], entry_time, *values[5:]),
+
+        stay_id = fields.stay_id
+        patient_id = fields.patient_id
+        patientunitstayid = fields.patientunitstayid
+
+        if stay_id is not None and patientunitstayid is not None:
+            raise ValueError(
+                "Historical identifier 'patientunitstayid' cannot be combined with registered 'stay_id'."
             )
+
+        with self._connection() as connection:
+            if stay_id is not None:
+                stay_row = connection.execute(
+                    "SELECT id, patient_id, discharge_status FROM icu_stays WHERE id = ?",
+                    (stay_id,),
+                ).fetchone()
+                if not stay_row:
+                    raise KeyError(f"ICU stay '{stay_id}' not found.")
+                if stay_row["discharge_status"] != "active":
+                    raise ValueError("Cannot add clinical records to a discharged ICU stay.")
+
+                if patient_id is not None:
+                    pat_row = connection.execute(
+                        "SELECT id FROM patients WHERE id = ?", (patient_id,)
+                    ).fetchone()
+                    if not pat_row:
+                        raise KeyError(f"Patient '{patient_id}' not found.")
+                    if stay_row["patient_id"] != patient_id:
+                        raise ValueError(f"ICU stay '{stay_id}' does not belong to patient '{patient_id}'.")
+                else:
+                    patient_id = stay_row["patient_id"]
+
+                # Registered record: ensure patientunitstayid is NULL (never substitute stay_id!)
+                patientunitstayid = None
+
+            elif patientunitstayid is not None:
+                # Historical eICU record: registered fields must be None
+                patient_id = None
+                stay_id = None
+            else:
+                raise ValueError("Either patientunitstayid or stay_id must be provided.")
+
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO clinical_records (
+                        record_id, patientunitstayid, patient_id, stay_id, category, measurement_name,
+                        value_json, unit, measurement_time, entry_time, entered_by,
+                        source, notes, observation_period, reference_range,
+                        sample_collection_time, result_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MANUAL_ENTRY', ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record_id,
+                        patientunitstayid,
+                        patient_id,
+                        stay_id,
+                        *values[:5],
+                        entry_time,
+                        *values[5:],
+                    ),
+                )
+            except sqlite3.IntegrityError as err:
+                raise ValueError(f"Invalid clinical record reference: {err}") from err
             row = connection.execute(
                 "SELECT * FROM clinical_records WHERE record_id = ?",
                 (record_id,),
@@ -371,6 +590,70 @@ class ClinicalRecordStore:
     ) -> list[dict[str, object]]:
         conditions = ["patientunitstayid = ?"]
         parameters: list[object] = [patientunitstayid]
+        if category:
+            conditions.append("category = ?")
+            parameters.append(category)
+        if start_time:
+            conditions.append("measurement_time >= ?")
+            parameters.append(_utc_iso(start_time))
+        if end_time:
+            conditions.append("measurement_time <= ?")
+            parameters.append(_utc_iso(end_time))
+        if not include_voided:
+            conditions.append("voided_at IS NULL")
+        query = (
+            "SELECT * FROM clinical_records WHERE "
+            + " AND ".join(conditions)
+            + " ORDER BY measurement_time DESC, entry_time DESC"
+        )
+        with self._connection() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [self._record(row) for row in rows]
+
+    def list_for_patient_id(
+        self,
+        patient_id: int,
+        category: ClinicalCategory | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        include_voided: bool = False,
+        stay_id: int | None = None,
+    ) -> list[dict[str, object]]:
+        conditions = ["patient_id = ?"]
+        parameters: list[object] = [patient_id]
+        if stay_id:
+            conditions.append("stay_id = ?")
+            parameters.append(stay_id)
+        if category:
+            conditions.append("category = ?")
+            parameters.append(category)
+        if start_time:
+            conditions.append("measurement_time >= ?")
+            parameters.append(_utc_iso(start_time))
+        if end_time:
+            conditions.append("measurement_time <= ?")
+            parameters.append(_utc_iso(end_time))
+        if not include_voided:
+            conditions.append("voided_at IS NULL")
+        query = (
+            "SELECT * FROM clinical_records WHERE "
+            + " AND ".join(conditions)
+            + " ORDER BY measurement_time DESC, entry_time DESC"
+        )
+        with self._connection() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [self._record(row) for row in rows]
+
+    def list_for_stay_id(
+        self,
+        stay_id: int,
+        category: ClinicalCategory | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        include_voided: bool = False,
+    ) -> list[dict[str, object]]:
+        conditions = ["stay_id = ?"]
+        parameters: list[object] = [stay_id]
         if category:
             conditions.append("category = ?")
             parameters.append(category)
