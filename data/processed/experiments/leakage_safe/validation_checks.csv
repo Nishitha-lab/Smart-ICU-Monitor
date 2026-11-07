@@ -1,0 +1,6 @@
+check,status,detail
+input_hashes,PASS,All source inputs match recorded SHA-256 hashes.
+patient_splits,PASS,1816 unique patients; deterministic 70/15/15 split; no overlap.
+baseline_reconstruction,PASS,"Keys, patient mapping, targets, all features, and split assignments independently reconstructed."
+corrected_reconstruction,PASS,"Keys, patient mapping, targets, all features, and split assignments independently reconstructed."
+paired_cohort,PASS,"Baseline and corrected versions have identical keys, labels, and splits."

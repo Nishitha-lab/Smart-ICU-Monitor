@@ -1,0 +1,9 @@
+milestone,status,evidence,notes
+Leakage-safe patient-level cohort,PASS,leakage_safe/split_validation_report.md,"1816 people; disjoint partitions"
+Independent cohort validation,PASS,leakage_safe/validation_report.md,"5 checks passed"
+Paired supervised SpO2 experiments,PASS WITH LIMITATIONS,paired_models/experiment_report.md,"Held-out performance differences uncertain"
+Descriptive anomaly comparison,PASS WITH LIMITATIONS,paired_anomaly/experiment_report.md,"No anomaly ground truth; descriptive only"
+Isolated alert replay,PASS WITH LIMITATIONS,alert_replay/alert_replay_report.md,"Experimental risk and rule replay; anomaly signal omitted"
+Robustness tests,PASS,ml/experiments/test_experiment_robustness.py,"5 tests passed"
+Independent paired validation,PASS,paired_models/validation_report.md,"13 checks passed"
+Application integration readiness,NOT READY,docs/model_integration_readiness.md,"No production integration authorized"

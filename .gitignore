@@ -1,0 +1,44 @@
+# Local credentials and runtime configuration
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python environments and generated caches
+**/.venv/
+**/venv/
+**/__pycache__/
+*.py[cod]
+
+# Frontend dependencies
+**/node_modules/
+
+# Local archives and packaged project/data copies
+/Smart-ICU.zip
+/backend/.venv.zip
+/data/processed.zip
+/frontend/frontend.zip
+/ml/ml.zip
+
+# Raw source datasets and root-level processed clinical exports
+/data/real/
+/data/processed/*.csv
+/data/processed/model_readiness/
+/data/processed/spo2_audit/
+/data/processed/spo2_comparison/
+
+# Patient-level experiment inputs and scores
+/data/processed/experiments/leakage_safe/model_inputs_*.csv
+/data/processed/experiments/leakage_safe/patient_split_manifest.csv
+/data/processed/experiments/paired_models/test_predictions_*.csv
+/data/processed/experiments/paired_anomaly/test_anomaly_*.csv
+/data/processed/experiments/alert_replay/replay_*.csv
+/data/processed/experiments/alert_replay/priority_comparison_balanced_logistic.csv
+/data/processed/experiments/alert_replay/priority_comparison_probability_logistic.csv
+/data/processed/experiments/alert_replay/severe_alert_episodes.csv
+
+# Experimental bundles and configurations currently contain absolute local paths
+/models/experimental/spo2_cross_validation/*.joblib
+/data/processed/experiments/leakage_safe/experiment_configuration.json
+/data/processed/experiments/paired_models/experiment_configuration.json
+/data/processed/experiments/paired_anomaly/experiment_configuration.json
+/data/processed/experiments/alert_replay/replay_configuration.json

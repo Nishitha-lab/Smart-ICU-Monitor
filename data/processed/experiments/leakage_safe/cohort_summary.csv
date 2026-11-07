@@ -1,0 +1,3 @@
+dataset_version,patients,icu_stays,patient_hours,positive_hours,negative_hours,positive_rate,spo2_missing_hours,spo2_zero_hours
+baseline,1816,2419,139432,2159,137273,0.01548425038728556,11969,0
+corrected,1816,2419,139432,2159,137273,0.01548425038728556,11969,0

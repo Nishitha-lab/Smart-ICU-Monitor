@@ -1,0 +1,3 @@
+model,test_patient_hours,priority_changed_hours,priority_changed_fraction,baseline_critical_to_corrected_noncritical,baseline_noncritical_to_corrected_critical
+balanced_logistic,21446,239,0.01114426932761354,46,26
+probability_logistic,21446,4,0.00018651496782616804,1,3

@@ -1,0 +1,2 @@
+test_patient_hours,baseline_anomaly_rows,corrected_anomaly_rows,flag_overlap_rows,flag_union_rows,flag_jaccard_similarity,score_spearman_rho,score_spearman_pvalue,baseline_only_flags,corrected_only_flags
+21446,471,499,449,521,0.8618042226487524,0.997356989738969,0.0,22,50

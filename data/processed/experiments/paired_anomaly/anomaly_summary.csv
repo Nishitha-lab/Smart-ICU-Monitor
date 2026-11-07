@@ -1,0 +1,3 @@
+dataset_version,train_rows,test_rows,anomaly_rows,anomaly_rate,anomalous_patients,anomaly_with_clinical_warning,anomaly_with_clinical_severe_rule
+baseline,96731,21446,471,0.02196213746153129,55,395,123
+corrected,96731,21446,499,0.023267742236314466,59,427,135
