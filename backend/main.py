@@ -1,11 +1,24 @@
 from pathlib import Path
 from contextlib import asynccontextmanager
+from datetime import datetime
+import os
+from uuid import UUID
 
 from services.serial_service import serial_monitor
+from services.clinical_records import (
+    ClinicalCategory,
+    ClinicalRecordConflict,
+    ClinicalRecordCreate,
+    ClinicalRecordDatabaseBusy,
+    ClinicalRecordStore,
+    ClinicalRecordUpdate,
+    ClinicalRecordVoid,
+)
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 
 # ============================================================
@@ -14,6 +27,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_FILE = ROOT / "data" / "processed" / "smart_icu_final_alerts.csv"
+configured_clinical_db_path = os.getenv("SMART_ICU_CLINICAL_DB_PATH", "").strip()
+CLINICAL_DB_FILE = (
+    Path(configured_clinical_db_path)
+    if configured_clinical_db_path
+    else ROOT / "data" / "clinical_records.sqlite3"
+)
+if not CLINICAL_DB_FILE.is_absolute():
+    CLINICAL_DB_FILE = ROOT / CLINICAL_DB_FILE
+clinical_record_store = ClinicalRecordStore(CLINICAL_DB_FILE)
 
 
 # ============================================================
@@ -26,6 +48,7 @@ async def lifespan(app: FastAPI):
     print("Loading Smart-ICU historical dataset...")
     df = load_dataset()
     print(f"Loaded {len(df):,} patient-hour rows from {df['patientunitstayid'].nunique():,} ICU stays.")
+    clinical_record_store.initialize()
     serial_monitor.start()
     try:
         yield
@@ -38,6 +61,19 @@ app = FastAPI(
     version="0.3.0",
     lifespan=lifespan
 )
+
+
+@app.exception_handler(ClinicalRecordDatabaseBusy)
+async def clinical_record_database_busy(
+    request: Request,
+    error: ClinicalRecordDatabaseBusy,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(error)},
+        headers={"Retry-After": "1"},
+    )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -160,6 +196,149 @@ def health_check():
 def get_hardware_telemetry():
     """Latest parsed ESP32 reading; this is not linked to an eICU patient."""
     return serial_monitor.snapshot()
+
+
+# ============================================================
+# MANUALLY ENTERED CLINICAL RECORDS
+# ============================================================
+
+def require_existing_stay(patientunitstayid: int) -> None:
+    if df is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Historical patient dataset is not loaded.",
+        )
+    if not (df["patientunitstayid"] == patientunitstayid).any():
+        raise HTTPException(
+            status_code=404,
+            detail=f"ICU patient stay {patientunitstayid} not found.",
+        )
+
+
+def validate_clinical_date_range(
+    start_time: datetime | None,
+    end_time: datetime | None,
+) -> None:
+    for label, value in (("start_time", start_time), ("end_time", end_time)):
+        if value is not None and value.utcoffset() is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{label} must include a timezone.",
+            )
+    if start_time and end_time and start_time > end_time:
+        raise HTTPException(
+            status_code=422,
+            detail="start_time cannot be after end_time.",
+        )
+
+
+@app.get("/api/clinical-records/patient-stays")
+def get_clinical_record_patient_stays(
+    query: str = Query(default="", max_length=12),
+    limit: int = Query(default=25, ge=1, le=100),
+):
+    if df is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Historical patient dataset is not loaded.",
+        )
+    if query and not query.isdecimal():
+        raise HTTPException(
+            status_code=400,
+            detail="Patient stay search must contain digits only.",
+        )
+
+    patient_ids = (
+        pd.to_numeric(df["patientunitstayid"], errors="coerce")
+        .dropna()
+        .astype("int64")
+        .drop_duplicates()
+        .sort_values()
+    )
+    if query:
+        patient_ids = patient_ids[
+            patient_ids.astype(str).str.startswith(query)
+        ]
+    return {"patient_ids": patient_ids.head(limit).astype(int).tolist()}
+
+
+@app.post("/api/clinical-records", status_code=201)
+def create_clinical_record(record: ClinicalRecordCreate):
+    require_existing_stay(record.patientunitstayid)
+    return clinical_record_store.create(record)
+
+
+@app.get("/api/patients/{patientunitstayid}/clinical-records")
+def get_patient_clinical_records(
+    patientunitstayid: int,
+    category: ClinicalCategory | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    include_voided: bool = False,
+):
+    require_existing_stay(patientunitstayid)
+    validate_clinical_date_range(start_time, end_time)
+    return {
+        "patientunitstayid": patientunitstayid,
+        "records": clinical_record_store.list_for_patient(
+            patientunitstayid,
+            category=category,
+            start_time=start_time,
+            end_time=end_time,
+            include_voided=include_voided,
+        ),
+    }
+
+
+@app.get("/api/clinical-records/{record_id}/revisions")
+def get_clinical_record_revisions(record_id: UUID):
+    if clinical_record_store.get(str(record_id)) is None:
+        raise HTTPException(status_code=404, detail="Clinical record not found.")
+    return {
+        "record_id": str(record_id),
+        "revisions": clinical_record_store.revisions(str(record_id)),
+    }
+
+
+@app.get("/api/clinical-records/{record_id}")
+def get_clinical_record(record_id: UUID):
+    record = clinical_record_store.get(str(record_id))
+    if record is None:
+        raise HTTPException(status_code=404, detail="Clinical record not found.")
+    return record
+
+
+@app.put("/api/clinical-records/{record_id}")
+def update_clinical_record(record_id: UUID, record: ClinicalRecordUpdate):
+    try:
+        updated = clinical_record_store.update(str(record_id), record)
+    except ClinicalRecordConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if updated is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Clinical record not found or already voided.",
+        )
+    return updated
+
+
+@app.delete("/api/clinical-records/{record_id}")
+def void_clinical_record(
+    record_id: UUID,
+    void: ClinicalRecordVoid = Body(...),
+):
+    try:
+        voided = clinical_record_store.void(
+            str(record_id),
+            expected_version=void.expected_version,
+            voided_by=void.voided_by,
+            void_reason=void.void_reason,
+        )
+    except ClinicalRecordConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if voided is None:
+        raise HTTPException(status_code=404, detail="Clinical record not found.")
+    return voided
 
 
 # ============================================================

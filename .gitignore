@@ -22,6 +22,7 @@
 # Raw source datasets and root-level processed clinical exports
 /data/real/
 /data/processed/*.csv
+/data/clinical_records.sqlite3*
 /data/processed/model_readiness/
 /data/processed/spo2_audit/
 /data/processed/spo2_comparison/

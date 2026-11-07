@@ -95,10 +95,12 @@ describe("Smart ICU dashboard", () => {
   let hardwarePayload: Record<string, unknown>;
   let requestUrls: string[];
   let failSummaryRequest: boolean;
+  let failClinicalPatientSearch: boolean;
 
   beforeEach(() => {
     requestUrls = [];
     failSummaryRequest = false;
+    failClinicalPatientSearch = false;
     hardwarePayload = {
       connected: false,
       connection_status: "DISCONNECTED",
@@ -136,6 +138,20 @@ describe("Smart ICU dashboard", () => {
         }
         if (url.endsWith("/api/hardware/telemetry")) {
           return Promise.resolve(jsonResponse(hardwarePayload));
+        }
+        if (url.includes("/api/clinical-records/patient-stays")) {
+          if (failClinicalPatientSearch) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({ detail: "Clinical API unavailable" }),
+                { status: 503, headers: { "Content-Type": "application/json" } },
+              ),
+            );
+          }
+          return Promise.resolve(jsonResponse({ patient_ids: [123, 456] }));
+        }
+        if (url.includes("/api/patients/123/clinical-records")) {
+          return Promise.resolve(jsonResponse({ records: [] }));
         }
 
         const patientId = Number(url.split("/").pop());
@@ -217,12 +233,70 @@ describe("Smart ICU dashboard", () => {
     });
   });
 
-  it("shows a clear unavailable state when the API fails", async () => {
+  it("opens the independent clinical records section", async () => {
+    render(<App />);
+    await screen.findByText("HISTORICAL ICU OVERVIEW");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Clinical Observations & Lab Results",
+      })
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Clinical Observations & Lab Results",
+      })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/separate from historical eICU data, ESP32 telemetry/)
+    ).toBeInTheDocument();
+  });
+
+  it("scopes the unavailable status to historical dashboard data", async () => {
     failSummaryRequest = true;
     render(<App />);
 
-    expect(await screen.findByText("API UNAVAILABLE")).toBeInTheDocument();
+    expect(
+      await screen.findByText("HISTORICAL DATA UNAVAILABLE"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Failed to load summary")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Clinical Observations & Lab Results",
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", {
+        name: "Clinical Observations & Lab Results",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("option", { name: "123" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Clinical records API: available")).toBeInTheDocument();
+  });
+
+  it("keeps historical dashboard status loaded when the clinical API fails", async () => {
+    failClinicalPatientSearch = true;
+    render(<App />);
+    await screen.findByText("HISTORICAL ICU OVERVIEW");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Clinical Observations & Lab Results",
+      }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Clinical API unavailable",
+    );
+    expect(
+      screen.getByText("Clinical records API: unavailable"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("HISTORICAL DATA LOADED")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dashboard" }));
+    expect(await screen.findByText("HISTORICAL ICU OVERVIEW")).toBeInTheDocument();
+    expect(screen.getByText("HISTORICAL DATA LOADED")).toBeInTheDocument();
   });
 
   it("ignores an older patient response after a newer selection", async () => {

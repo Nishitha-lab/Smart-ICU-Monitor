@@ -5,8 +5,8 @@ import {
   useState,
 } from "react";
 import "./App.css";
-
-const API_BASE = "http://127.0.0.1:8000";
+import ClinicalRecords from "./ClinicalRecords";
+import { API_BASE } from "./api";
 
 type Summary = {
   total_rows: number;
@@ -421,6 +421,9 @@ function TrendChart({
 function App() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [patients, setPatients] = useState<Patient[]>([]);
+  const [activeSection, setActiveSection] = useState<"dashboard" | "clinical">(
+    "dashboard",
+  );
   const [priorityFilter, setPriorityFilter] = useState("all");
 
   const [selectedPatientId, setSelectedPatientId] =
@@ -681,21 +684,38 @@ function App() {
             className={`status-dot ${error ? "status-dot-offline" : ""}`}
           />
           {loading
-            ? "CONNECTING"
+            ? "HISTORICAL DATA CONNECTING"
             : error
-              ? "API UNAVAILABLE"
+              ? "HISTORICAL DATA UNAVAILABLE"
               : "HISTORICAL DATA LOADED"}
         </div>
       </header>
 
+      <nav className="module-navigation" aria-label="Application sections">
+        <button
+          type="button"
+          aria-current={activeSection === "dashboard" ? "page" : undefined}
+          onClick={() => setActiveSection("dashboard")}
+        >
+          Dashboard
+        </button>
+        <button
+          type="button"
+          aria-current={activeSection === "clinical" ? "page" : undefined}
+          onClick={() => setActiveSection("clinical")}
+        >
+          Clinical Observations &amp; Lab Results
+        </button>
+      </nav>
+
       <main className="dashboard">
-        {loading && (
+        {activeSection === "dashboard" && loading && (
           <div className="loading-card">
             Loading ICU intelligence...
           </div>
         )}
 
-        {error && (
+        {activeSection === "dashboard" && error && (
           <div className="error-card">
             <strong>Backend connection error</strong>
             <span>{error}</span>
@@ -705,7 +725,11 @@ function App() {
           </div>
         )}
 
-        {summary && !loading && !error && (
+        {activeSection === "clinical" && (
+          <ClinicalRecords />
+        )}
+
+        {summary && !loading && !error && activeSection === "dashboard" && (
           <>
             <section className="hero-section">
               <div>
