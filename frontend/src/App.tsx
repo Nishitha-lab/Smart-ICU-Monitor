@@ -1,4 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import "./App.css";
 
 const API_BASE = "http://127.0.0.1:8000";
@@ -72,14 +77,20 @@ type PatientHistoryRow = {
   final_explanation: string;
 };
 type IvTelemetry = {
+  fluidMl: number | null;
+  deviceStatus: string | null;
+  connectionStatus: string;
+  lastUpdate: string | null;
+};
+type HardwareTelemetryResponse = {
   connected: boolean;
-  bag_weight_g: number;
-  initial_weight_g: number;
-  remaining_volume_ml: number;
-  flow_rate_ml_per_hr: number;
-  level_percent: number;
-  status: "normal" | "low" | "critical";
-  last_update: string;
+  connection_status: string;
+  fluid_ml: number | null;
+  device_status: string | null;
+  last_update: string | null;
+  validity: {
+    fluid: boolean;
+  };
 };
 type TrendChartProps = {
   title: string;
@@ -117,6 +128,29 @@ function formatRisk(
 
   return `${(value * 100).toFixed(1)}%`;
 }
+
+function toIvTelemetry(
+  data: HardwareTelemetryResponse
+): IvTelemetry {
+  const fluidMl =
+    data.connected &&
+    data.validity.fluid &&
+    typeof data.fluid_ml === "number" &&
+    Number.isFinite(data.fluid_ml)
+      ? data.fluid_ml
+      : null;
+
+  return {
+    fluidMl,
+    deviceStatus:
+      fluidMl !== null && typeof data.device_status === "string"
+        ? data.device_status
+        : null,
+    connectionStatus: data.connection_status,
+    lastUpdate: data.last_update,
+  };
+}
+
 function getTrendDirection(
   data: PatientHistoryRow[],
   field: keyof PatientHistoryRow
@@ -402,103 +436,186 @@ function App() {
   const [error, setError] = useState("");
   const [detailError, setDetailError] = useState("");
   const [ivTelemetry, setIvTelemetry] =
-  useState<IvTelemetry | null>(null);
-  async function loadDashboard() {
-    try {
-      setLoading(true);
-      setError("");
+    useState<IvTelemetry | null>(null);
+  const [telemetryError, setTelemetryError] = useState("");
+  const detailRequestRef = useRef<AbortController | null>(null);
+  const detailPanelRef = useRef<HTMLDivElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
 
-      const summaryResponse = await fetch(
-        `${API_BASE}/api/summary`
-      );
+  useEffect(() => {
+    const controller = new AbortController();
 
-      if (!summaryResponse.ok) {
-        throw new Error("Failed to load summary");
+    async function loadDashboard() {
+      try {
+        const summaryResponse = await fetch(
+          `${API_BASE}/api/summary`,
+          { signal: controller.signal }
+        );
+
+        if (!summaryResponse.ok) {
+          throw new Error("Failed to load summary");
+        }
+
+        const summaryData: Summary =
+          await summaryResponse.json();
+
+        const patientUrl =
+          priorityFilter === "all"
+            ? `${API_BASE}/api/patients?limit=100`
+            : `${API_BASE}/api/patients?priority=${priorityFilter}&limit=100`;
+
+        const patientResponse = await fetch(patientUrl, {
+          signal: controller.signal,
+        });
+
+        if (!patientResponse.ok) {
+          throw new Error("Failed to load patients");
+        }
+
+        const patientData = await patientResponse.json();
+
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setSummary(summaryData);
+        setPatients(patientData.patients ?? []);
+        setError("");
+      } catch (err) {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Unable to connect to Smart-ICU backend."
+        );
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
       }
-
-      const summaryData: Summary =
-        await summaryResponse.json();
-
-      const patientUrl =
-        priorityFilter === "all"
-          ? `${API_BASE}/api/patients?limit=100`
-          : `${API_BASE}/api/patients?priority=${priorityFilter}&limit=100`;
-
-      const patientResponse =
-        await fetch(patientUrl);
-
-      if (!patientResponse.ok) {
-        throw new Error("Failed to load patients");
-      }
-
-      const patientData =
-        await patientResponse.json();
-
-      setSummary(summaryData);
-      setPatients(patientData.patients ?? []);
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to connect to Smart-ICU backend."
-      );
-    } finally {
-      setLoading(false);
     }
-  }
+
+    void loadDashboard();
+    return () => controller.abort();
+  }, [priorityFilter]);
 
   async function openPatient(patientId: number) {
-  try {
+    detailRequestRef.current?.abort();
+    const controller = new AbortController();
+    detailRequestRef.current = controller;
+
+    if (selectedPatientId === null) {
+      returnFocusRef.current =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+    }
+
     setSelectedPatientId(patientId);
     setPatientHistory([]);
-    setIvTelemetry(null);
     setDetailLoading(true);
     setDetailError("");
 
-    const response = await fetch(
-      `${API_BASE}/api/patients/${patientId}`
-    );
-
-    if (!response.ok) {
-      throw new Error(
-        `Failed to load patient #${patientId}`
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/patients/${patientId}`,
+        { signal: controller.signal }
       );
+
+      if (!response.ok) {
+        throw new Error(
+          `Failed to load patient #${patientId}`
+        );
+      }
+
+      const data = await response.json();
+
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      const patientHistoryData: PatientHistoryRow[] =
+        Array.isArray(data)
+          ? data
+          : Array.isArray(data.history)
+            ? data.history
+            : [];
+
+      setPatientHistory(patientHistoryData);
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setDetailError(
+          err instanceof Error
+            ? err.message
+            : "Unable to load patient history."
+        );
+      }
+    } finally {
+      if (detailRequestRef.current === controller) {
+        detailRequestRef.current = null;
+        setDetailLoading(false);
+      }
     }
-
-    const data = await response.json();
-
-    const patientHistoryData: PatientHistoryRow[] =
-  Array.isArray(data)
-    ? data
-    : Array.isArray(data.history)
-      ? data.history
-      : [];
-
-    setPatientHistory(patientHistoryData);
-
-    // Live ESP32 telemetry is polled independently from historical eICU data.
-    // No simulated IV values are assigned to a historical patient record.
-
-  } catch (err) {
-    setDetailError(
-      err instanceof Error
-        ? err.message
-        : "Unable to load patient history."
-    );
-  } finally {
-    setDetailLoading(false);
   }
-}
 
-  function closePatient() {
+  const closePatient = useCallback(() => {
+    detailRequestRef.current?.abort();
+    detailRequestRef.current = null;
     setSelectedPatientId(null);
     setPatientHistory([]);
     setDetailError("");
-  }
+  }, []);
 
   useEffect(() => {
-    loadDashboard();
-  }, [priorityFilter]);
+    if (selectedPatientId === null) {
+      return;
+    }
+
+    closeButtonRef.current?.focus();
+
+    function handleDialogKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        closePatient();
+        return;
+      }
+
+      if (event.key !== "Tab" || !detailPanelRef.current) {
+        return;
+      }
+
+      const focusableElements =
+        detailPanelRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+      const first = focusableElements[0];
+      const last = focusableElements[focusableElements.length - 1];
+
+      if (!first || !last) {
+        event.preventDefault();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleDialogKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleDialogKeyDown);
+      returnFocusRef.current?.focus();
+      returnFocusRef.current = null;
+    };
+  }, [closePatient, selectedPatientId]);
+
+  useEffect(() => () => {
+    detailRequestRef.current?.abort();
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -506,22 +623,20 @@ function App() {
       try {
         const response = await fetch(`${API_BASE}/api/hardware/telemetry`);
         if (!response.ok) throw new Error("Hardware telemetry unavailable");
-        const data = await response.json();
+        const data: HardwareTelemetryResponse =
+          await response.json();
         if (!active) return;
-        const connected = Boolean(data.connected);
-        const fluid = typeof data.fluid_ml === "number" ? data.fluid_ml : 0;
-        setIvTelemetry({
-          connected,
-          bag_weight_g: fluid,
-          initial_weight_g: 1000,
-          remaining_volume_ml: fluid,
-          flow_rate_ml_per_hr: 0,
-          level_percent: Math.max(0, Math.min(100, fluid / 10)),
-          status: data.device_status === "CRITICAL" ? "critical" : data.device_status === "WARNING" ? "low" : "normal",
-          last_update: data.last_update ?? data.connection_status ?? "Waiting for ESP32",
-        });
-      } catch {
-        if (active) setIvTelemetry(null);
+        setIvTelemetry(toIvTelemetry(data));
+        setTelemetryError("");
+      } catch (err) {
+        if (active) {
+          setIvTelemetry(null);
+          setTelemetryError(
+            err instanceof Error
+              ? err.message
+              : "Hardware telemetry unavailable."
+          );
+        }
       }
     };
     loadHardware();
@@ -529,14 +644,26 @@ function App() {
     return () => { active = false; window.clearInterval(timer); };
   }, []);
 
-  const visiblePatients = useMemo(
-    () => patients,
-    [patients]
-  );
   const latestDetailRow =
   patientHistory.length > 0
     ? patientHistory[patientHistory.length - 1]
     : null;
+  const deviceStatus = ivTelemetry?.deviceStatus?.toUpperCase() ?? null;
+  const deviceStatusClass =
+    deviceStatus === "NORMAL"
+      ? "normal"
+      : deviceStatus === "WARNING"
+        ? "low"
+        : deviceStatus === "CRITICAL"
+          ? "critical"
+          : "unknown";
+
+  function selectPriorityFilter(filter: string) {
+    if (filter !== priorityFilter) {
+      setLoading(true);
+      setPriorityFilter(filter);
+    }
+  }
 
   return (
     <div className="app-shell">
@@ -550,8 +677,14 @@ function App() {
         </div>
 
         <div className="system-status">
-          <span className="status-dot" />
-          SYSTEM ONLINE
+          <span
+            className={`status-dot ${error ? "status-dot-offline" : ""}`}
+          />
+          {loading
+            ? "CONNECTING"
+            : error
+              ? "API UNAVAILABLE"
+              : "HISTORICAL DATA LOADED"}
         </div>
       </header>
 
@@ -577,7 +710,7 @@ function App() {
             <section className="hero-section">
               <div>
                 <p className="eyebrow">
-                  REAL-TIME ICU OVERVIEW
+                  HISTORICAL ICU OVERVIEW
                 </p>
 
                 <h1>
@@ -585,10 +718,9 @@ function App() {
                 </h1>
 
                 <p className="hero-text">
-                  Clinical rules, anomaly detection,
-                  deterioration risk, treatment context,
-                  and fluid status are combined into
-                  one intelligent alert layer.
+                  Historical eICU records and precomputed research
+                  alerts are shown separately from live ESP32
+                  telemetry, when available.
                 </p>
               </div>
 
@@ -712,7 +844,7 @@ function App() {
                           : "filter"
                       }
                       onClick={() =>
-                        setPriorityFilter(filter)
+                        selectPriorityFilter(filter)
                       }
                     >
                       {filter}
@@ -736,7 +868,7 @@ function App() {
                   </thead>
 
                   <tbody>
-                    {visiblePatients.map(
+                    {patients.map(
                       (patient) => (
                         <tr
                           key={
@@ -805,7 +937,7 @@ function App() {
                       )
                     )}
 
-                    {visiblePatients.length === 0 && (
+                    {patients.length === 0 && (
                       <tr>
                         <td
                           colSpan={7}
@@ -819,18 +951,31 @@ function App() {
                 </table>
               </div>
             </section>
+
+            <p className="research-scope">
+              Historical eICU demo data. The model target is expired ICU
+              discharge within 24 hours, not general clinical deterioration.
+              Not validated for patient-care use.
+            </p>
           </>
         )}
       </main>
 
       <footer className="footer">
-        Smart-ICU research prototype · Model outputs are
-        decision-support signals, not clinical diagnoses.
+        Smart-ICU research prototype · Retrospective demo outputs are not
+        clinical diagnoses and are not for patient-care use.
       </footer>
 
       {selectedPatientId !== null && (
         <div className="patient-overlay">
-          <div className="patient-detail-panel">
+          <div
+            className="patient-detail-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="patient-detail-title"
+            ref={detailPanelRef}
+            tabIndex={-1}
+          >
             <div className="detail-topbar">
               <div>
                 <p className="eyebrow">
@@ -838,12 +983,16 @@ function App() {
                 </p>
 
                 <h2>
+                  <span id="patient-detail-title">
                   Patient #{selectedPatientId}
+                  </span>
                 </h2>
               </div>
 
               <button
                 className="close-button"
+                aria-label="Close patient detail"
+                ref={closeButtonRef}
                 onClick={closePatient}
               >
                 ×
@@ -878,7 +1027,7 @@ function App() {
 
                       <div>
                         <span className="detail-label">
-                          Current hour
+                          Latest recorded hour
                         </span>
 
                         <strong>
@@ -888,7 +1037,9 @@ function App() {
                     </div>
 
                     <div className="detail-metric">
-                      <span>24h deterioration risk</span>
+                      <span>
+                        Probability of expired ICU discharge within 24 hours
+                      </span>
 
                       <strong>
                         {formatRisk(
@@ -1204,15 +1355,16 @@ function App() {
     <div className="iv-connection-status">
       <span
         className={
-          ivTelemetry?.connected
+          ivTelemetry?.connectionStatus === "CONNECTED"
             ? "iv-dot connected"
             : "iv-dot demo"
         }
       />
 
-      {ivTelemetry?.connected
-        ? "ESP32 CONNECTED"
-        : "WAITING FOR ESP32"}
+      {telemetryError
+        ? "TELEMETRY SERVICE UNAVAILABLE"
+        : ivTelemetry?.connectionStatus.replaceAll("_", " ")
+          ?? "WAITING FOR TELEMETRY"}
     </div>
   </div>
 
@@ -1221,89 +1373,48 @@ function App() {
       <div className="iv-card-header">
         <div>
           <span className="iv-label">
-            ESTIMATED IV LEVEL
+            ESP32 FLUID SENSOR READING
           </span>
 
           <strong>
             {formatNumber(
-              ivTelemetry?.remaining_volume_ml ?? null,
-              0
+              ivTelemetry?.fluidMl ?? null
             )}{" "}
             mL
           </strong>
         </div>
 
         <span
-          className={`iv-status iv-${ivTelemetry?.status ?? "normal"}`}
+          className={`iv-status iv-${deviceStatusClass}`}
         >
-          {ivTelemetry?.status ?? "normal"}
+          {deviceStatus ?? "UNAVAILABLE"}
         </span>
       </div>
 
-      <div className="iv-tank">
-        <div
-          className="iv-liquid"
-          style={{
-            height: `${ivTelemetry?.level_percent ?? 0}%`,
-          }}
-        />
-      </div>
-
-      <div className="iv-scale">
-        <span>0%</span>
-        <strong>
-          {formatNumber(
-            ivTelemetry?.level_percent ?? null,
-            0
-          )}
-          %
-        </strong>
-        <span>100%</span>
+      <div className="iv-reading-note">
+        {ivTelemetry?.fluidMl === null || !ivTelemetry
+          ? "No fresh, valid fluid reading is available."
+          : "Raw device value; remaining volume and flow are not inferred."}
       </div>
     </div>
 
     <div className="iv-metrics">
       <div className="iv-metric">
-        <span>Bag weight</span>
+        <span>Connection state</span>
 
         <strong>
-          {formatNumber(
-            ivTelemetry?.bag_weight_g ?? null,
-            0
-          )}{" "}
-          g
+          {telemetryError
+            ? "UNAVAILABLE"
+            : ivTelemetry?.connectionStatus.replaceAll("_", " ")
+              ?? "WAITING"}
         </strong>
       </div>
 
       <div className="iv-metric">
-        <span>Initial weight</span>
+        <span>Last valid update</span>
 
         <strong>
-          {formatNumber(
-            ivTelemetry?.initial_weight_g ?? null,
-            0
-          )}{" "}
-          g
-        </strong>
-      </div>
-
-      <div className="iv-metric">
-        <span>Estimated flow</span>
-
-        <strong>
-          {formatNumber(
-            ivTelemetry?.flow_rate_ml_per_hr ?? null,
-            0
-          )}{" "}
-          mL/hr
-        </strong>
-      </div>
-
-      <div className="iv-metric">
-        <span>Telemetry</span>
-
-        <strong>
-          {ivTelemetry?.last_update ?? "—"}
+          {ivTelemetry?.lastUpdate ?? "—"}
         </strong>
       </div>
     </div>
@@ -1360,8 +1471,18 @@ function App() {
   </div>
 
   <div className="iv-notice">
-    <strong>Live hardware feed:</strong>{" "}
-    ESP32 readings are displayed independently from historical eICU patient records. A disconnected or stale feed is not treated as a normal reading.
+    {telemetryError ? (
+      <>
+        <strong>Telemetry unavailable:</strong> {telemetryError}
+      </>
+    ) : (
+      <>
+        <strong>Live hardware feed:</strong>{" "}
+        ESP32 telemetry is separate from historical eICU records. Only fresh,
+        valid fluid readings are shown; remaining volume and flow are not
+        inferred.
+      </>
+    )}
   </div>
 </section>
 

@@ -133,7 +133,7 @@ def root():
     return {
         "system": "Smart ICU Patient Safety System",
         "status": "online",
-        "version": "0.2.0"
+        "version": app.version
     }
 
 
@@ -280,19 +280,16 @@ def get_patients(
             detail="Dataset not loaded."
         )
 
-    data = df.copy()
+    valid_priorities = {
+        "normal",
+        "low",
+        "moderate",
+        "high",
+        "critical"
+    }
 
     if priority:
-
         priority = priority.lower()
-
-        valid_priorities = {
-            "normal",
-            "low",
-            "moderate",
-            "high",
-            "critical"
-        }
 
         if priority not in valid_priorities:
             raise HTTPException(
@@ -304,16 +301,9 @@ def get_patients(
                 )
             )
 
-        data = data[
-            data[
-                "final_alert_priority"
-            ].str.lower()
-            == priority
-        ]
-
     # Latest hour per patient
     latest = (
-        data
+        df
         .sort_values(
             "hour"
         )
@@ -323,6 +313,14 @@ def get_patients(
         )
         .tail(1)
     )
+
+    if priority:
+        latest = latest[
+            latest[
+                "final_alert_priority"
+            ].str.lower()
+            == priority
+        ]
 
     # Sort the patient list by alert severity
     severity_order = {

@@ -6,7 +6,13 @@ from typing import Any
 import serial
 from serial import SerialException
 
-LINE_PATTERN = re.compile(r"Fluid:\s*([\d.]+)\s*mL\s*\|\s*BPM:\s*([\d.]+)\s*\|\s*SpO2:\s*([\d.]+)%\s*\|\s*STATUS:\s*(\w+)")
+_NUMBER_PATTERN = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+LINE_PATTERN = re.compile(
+    rf"Fluid:\s*({_NUMBER_PATTERN})\s*mL\s*\|\s*"
+    rf"BPM:\s*({_NUMBER_PATTERN})\s*\|\s*"
+    rf"SpO2:\s*({_NUMBER_PATTERN})%\s*\|\s*"
+    r"STATUS:\s*(\w+)"
+)
 
 class SerialMonitor:
     def __init__(self, port: str | None = None, baudrate: int = 115200):
@@ -60,7 +66,17 @@ class SerialMonitor:
                 self._serial = serial.Serial(self.port, self.baudrate, timeout=1)
                 # ESP32 may reset when the serial port opens; allow it to boot.
                 time.sleep(2)
-                self._set(connected=True, connection_status="CONNECTED", last_error=None)
+                self._set(
+                    connected=False,
+                    connection_status="WAITING_FOR_DATA",
+                    fluid_ml=None,
+                    bpm=None,
+                    spo2=None,
+                    device_status=None,
+                    last_update=None,
+                    last_error=None,
+                    validity={"fluid": False, "bpm": False, "spo2": False},
+                )
                 while not self._stop.is_set():
                     raw = self._serial.readline()
                     if not raw: continue

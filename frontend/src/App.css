@@ -71,6 +71,18 @@ button:focus-visible {
   box-shadow: 0 0 0 4px rgba(39, 174, 96, 0.12);
 }
 
+.status-dot-offline {
+  background: #c92a2a;
+  box-shadow: 0 0 0 4px rgba(201, 42, 42, 0.12);
+}
+
+.research-scope {
+  margin: 14px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .dashboard {
   max-width: 1480px;
   margin: 0 auto;
@@ -927,6 +939,8 @@ tr:last-child td {
   .history-row {
     grid-template-columns: 40px 82px 55px 1fr;
   }
+}
+
   /* =========================
    RECENT CONTEXT
    ========================= */
@@ -1186,49 +1200,16 @@ tr:last-child td {
   color: #c92a2a;
 }
 
-.iv-tank {
-  height: 145px;
-  width: 78px;
-  margin: 22px auto 10px;
-  border: 2px solid #98a2b3;
-  border-radius: 10px 10px 16px 16px;
-  position: relative;
-  overflow: hidden;
-  background: #f8fafc;
+.iv-unknown {
+  background: #f2f4f7;
+  color: #667085;
 }
 
-.iv-tank::before {
-  content: "";
-  position: absolute;
-  top: -9px;
-  left: 24px;
-  width: 26px;
-  height: 9px;
-  border: 2px solid #98a2b3;
-  border-bottom: 0;
-  border-radius: 5px 5px 0 0;
-}
-
-.iv-liquid {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: #4b5563;
-  transition: height 0.4s ease;
-}
-
-.iv-scale {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  color: #98a2b3;
-  font-size: 10px;
-}
-
-.iv-scale strong {
-  color: #344054;
-  font-size: 13px;
+.iv-reading-note {
+  margin-top: 20px;
+  color: #667085;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .iv-metrics {
@@ -1295,4 +1276,44 @@ tr:last-child td {
   font-size: 10px;
   line-height: 1.5;
 }
+
+@media (max-width: 950px) {
+  .recent-context-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .iv-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .iv-clinical-card {
+    grid-column: span 2;
+  }
+}
+
+@media (max-width: 760px) {
+  .iv-monitor-section,
+  .recent-context-section {
+    padding: 26px 18px 0;
+  }
+
+  .iv-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .iv-clinical-card {
+    grid-column: auto;
+  }
+
+  .recent-context-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .convergence-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .history-row {
+    grid-template-columns: 40px 82px 55px 1fr;
+  }
 }
