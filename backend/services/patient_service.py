@@ -43,6 +43,7 @@ class PatientCreate(BaseModel):
     sex: Literal["male", "female", "other", "unknown", "Male", "Female", "Other", "Unknown"] | None = None
     date_of_birth: Annotated[str | None, Field(max_length=20)] = None
     contact_information: Annotated[str | None, Field(max_length=255)] = None
+    weight_kg: Annotated[float | None, Field(gt=0, le=500)] = None
 
     @field_validator("name")
     @classmethod
@@ -89,6 +90,7 @@ class PatientUpdate(BaseModel):
     date_of_birth: Annotated[str | None, Field(max_length=20)] = None
     contact_information: Annotated[str | None, Field(max_length=255)] = None
     status: Literal["active", "archived"] | None = None
+    weight_kg: Annotated[float | None, Field(gt=0, le=500)] = None
 
     @field_validator("name")
     @classmethod
@@ -234,6 +236,8 @@ class TelemetryIngest(BaseModel):
 class PatientStore:
     def __init__(self, database_path: Path) -> None:
         self.database_path = Path(database_path)
+        from services.alert_manager import AlertManager
+        self.alert_manager = AlertManager(self.database_path)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=10)
@@ -318,6 +322,7 @@ class PatientStore:
                     date_of_birth TEXT,
                     contact_information TEXT,
                     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+                    weight_kg REAL CHECK (weight_kg IS NULL OR (weight_kg > 0 AND weight_kg <= 500)),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -329,6 +334,17 @@ class PatientStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_patients_status ON patients (status);"
             )
+
+            # Migrate existing patients table if weight_kg is missing
+            table_info = connection.execute("PRAGMA table_info(patients)").fetchall()
+            col_names = {row["name"] for row in table_info}
+            if "weight_kg" not in col_names:
+                try:
+                    connection.execute(
+                        "ALTER TABLE patients ADD COLUMN weight_kg REAL CHECK (weight_kg IS NULL OR (weight_kg > 0 AND weight_kg <= 500));"
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
             # ICU Stays table
             connection.execute(
@@ -452,6 +468,7 @@ class PatientStore:
                 """,
                 (now_iso, now_iso),
             )
+        self.alert_manager.initialize()
 
     # ------------------------------------------------------------
     # PATIENT OPERATIONS
@@ -487,8 +504,8 @@ class PatientStore:
                     """
                     INSERT INTO patients (
                         patient_code, name, age, sex, date_of_birth, contact_information,
-                        status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                        weight_kg, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
                     """,
                     (
                         code,
@@ -497,6 +514,7 @@ class PatientStore:
                         fields.sex,
                         fields.date_of_birth,
                         fields.contact_information,
+                        fields.weight_kg,
                         now_iso,
                         now_iso,
                     ),
@@ -731,6 +749,9 @@ class PatientStore:
             if fields.status is not None:
                 updates.append("status = ?")
                 params.append(fields.status)
+            if fields.weight_kg is not None:
+                updates.append("weight_kg = ?")
+                params.append(fields.weight_kg)
 
             params.append(patient_id)
             connection.execute(
@@ -1497,7 +1518,291 @@ class PatientStore:
             ).fetchone()
             res = dict(row)
             res["quality_metadata"] = validity
-            return self._mask_invalid_telemetry(res)
+
+        # Evaluate alerts for attributed telemetry outside the transaction
+        if patient_id is not None and stay_id is not None:
+            try:
+                self._evaluate_telemetry_alerts(
+                    patient_id=patient_id,
+                    stay_id=stay_id,
+                    fluid_ml=fluid_ml,
+                    bpm=bpm,
+                    spo2=spo2,
+                    validity=validity,
+                    reading_time=reading_time,
+                )
+            except Exception:
+                pass
+
+        return self._mask_invalid_telemetry(res)
+
+    def _evaluate_telemetry_alerts(
+        self,
+        patient_id: int,
+        stay_id: int,
+        fluid_ml: float | None,
+        bpm: float | None,
+        spo2: float | None,
+        validity: dict[str, bool],
+        reading_time: str,
+    ) -> None:
+        from services.clinical_alert_engine import ClinicalInterpretation
+
+        # 1. IV Fluid Level
+        if validity.get("fluid") and fluid_ml is not None:
+            if fluid_ml <= 200.0:
+                interp = ClinicalInterpretation(
+                    status="CRITICAL_LOW",
+                    severity="CRITICAL",
+                    category="hardware",
+                    measurement_name="IV Fluid Level",
+                    canonical_test_id="IV_FLUID",
+                    measured_value=fluid_ml,
+                    unit="mL",
+                    reference_range="> 500 mL",
+                    critical_threshold="<= 200 mL",
+                    reference_source="ESP32 Telemetry Safety Standard",
+                    explanation=f"CRITICAL LOW IV FLUID — {fluid_ml:g} mL remaining in reservoir. Urgent infusion bag replacement required.",
+                    requires_alert=True,
+                )
+                self.alert_manager.process_clinical_interpretation(
+                    interp,
+                    patient_id=patient_id,
+                    stay_id=stay_id,
+                    patientunitstayid=None,
+                    source="ESP32_TELEMETRY",
+                    trigger_time=reading_time,
+                )
+            elif fluid_ml <= 500.0:
+                interp = ClinicalInterpretation(
+                    status="LOW",
+                    severity="MODERATE",
+                    category="hardware",
+                    measurement_name="IV Fluid Level",
+                    canonical_test_id="IV_FLUID",
+                    measured_value=fluid_ml,
+                    unit="mL",
+                    reference_range="> 500 mL",
+                    critical_threshold="<= 200 mL",
+                    reference_source="ESP32 Telemetry Safety Standard",
+                    explanation=f"LOW IV FLUID WARNING — {fluid_ml:g} mL remaining in reservoir.",
+                    requires_alert=True,
+                )
+                self.alert_manager.process_clinical_interpretation(
+                    interp,
+                    patient_id=patient_id,
+                    stay_id=stay_id,
+                    patientunitstayid=None,
+                    source="ESP32_TELEMETRY",
+                    trigger_time=reading_time,
+                )
+            else:
+                interp = ClinicalInterpretation(
+                    status="NORMAL",
+                    category="hardware",
+                    measurement_name="IV Fluid Level",
+                    canonical_test_id="IV_FLUID",
+                    measured_value=fluid_ml,
+                    unit="mL",
+                    reference_range="> 500 mL",
+                    reference_source="ESP32 Telemetry Safety Standard",
+                    explanation=f"Normal IV fluid level: {fluid_ml:g} mL.",
+                    requires_alert=False,
+                )
+                self.alert_manager.process_clinical_interpretation(
+                    interp,
+                    patient_id=patient_id,
+                    stay_id=stay_id,
+                    patientunitstayid=None,
+                    source="ESP32_TELEMETRY",
+                    trigger_time=reading_time,
+                )
+
+        # 2. Heart Rate (BPM)
+        if validity.get("bpm") and bpm is not None:
+            if bpm < 40:
+                interp = ClinicalInterpretation(
+                    status="CRITICAL_LOW",
+                    severity="CRITICAL",
+                    category="hemodynamic",
+                    measurement_name="Heart Rate",
+                    canonical_test_id="HEART_RATE",
+                    measured_value=bpm,
+                    unit="BPM",
+                    reference_range="50 - 120 BPM",
+                    critical_threshold="< 40 BPM",
+                    reference_source="AHA Telemetry Guidelines",
+                    explanation=f"CRITICAL SEVERE BRADYCARDIA — Telemetry Heart Rate: {bpm:g} BPM (< 40 BPM).",
+                    requires_alert=True,
+                )
+                self.alert_manager.process_clinical_interpretation(
+                    interp,
+                    patient_id=patient_id,
+                    stay_id=stay_id,
+                    patientunitstayid=None,
+                    source="ESP32_TELEMETRY",
+                    trigger_time=reading_time,
+                )
+            elif bpm > 140:
+                interp = ClinicalInterpretation(
+                    status="CRITICAL_HIGH",
+                    severity="CRITICAL",
+                    category="hemodynamic",
+                    measurement_name="Heart Rate",
+                    canonical_test_id="HEART_RATE",
+                    measured_value=bpm,
+                    unit="BPM",
+                    reference_range="50 - 120 BPM",
+                    critical_threshold="> 140 BPM",
+                    reference_source="AHA Telemetry Guidelines",
+                    explanation=f"CRITICAL SEVERE TACHYCARDIA — Telemetry Heart Rate: {bpm:g} BPM (> 140 BPM).",
+                    requires_alert=True,
+                )
+                self.alert_manager.process_clinical_interpretation(
+                    interp,
+                    patient_id=patient_id,
+                    stay_id=stay_id,
+                    patientunitstayid=None,
+                    source="ESP32_TELEMETRY",
+                    trigger_time=reading_time,
+                )
+            elif bpm < 50:
+                interp = ClinicalInterpretation(
+                    status="LOW",
+                    severity="MODERATE",
+                    category="hemodynamic",
+                    measurement_name="Heart Rate",
+                    canonical_test_id="HEART_RATE",
+                    measured_value=bpm,
+                    unit="BPM",
+                    reference_range="50 - 120 BPM",
+                    critical_threshold="< 40 BPM",
+                    reference_source="AHA Telemetry Guidelines",
+                    explanation=f"BRADYCARDIA — Telemetry Heart Rate: {bpm:g} BPM.",
+                    requires_alert=True,
+                )
+                self.alert_manager.process_clinical_interpretation(
+                    interp,
+                    patient_id=patient_id,
+                    stay_id=stay_id,
+                    patientunitstayid=None,
+                    source="ESP32_TELEMETRY",
+                    trigger_time=reading_time,
+                )
+            elif bpm > 120:
+                interp = ClinicalInterpretation(
+                    status="HIGH",
+                    severity="MODERATE",
+                    category="hemodynamic",
+                    measurement_name="Heart Rate",
+                    canonical_test_id="HEART_RATE",
+                    measured_value=bpm,
+                    unit="BPM",
+                    reference_range="50 - 120 BPM",
+                    critical_threshold="> 140 BPM",
+                    reference_source="AHA Telemetry Guidelines",
+                    explanation=f"TACHYCARDIA — Telemetry Heart Rate: {bpm:g} BPM.",
+                    requires_alert=True,
+                )
+                self.alert_manager.process_clinical_interpretation(
+                    interp,
+                    patient_id=patient_id,
+                    stay_id=stay_id,
+                    patientunitstayid=None,
+                    source="ESP32_TELEMETRY",
+                    trigger_time=reading_time,
+                )
+            else:
+                interp = ClinicalInterpretation(
+                    status="NORMAL",
+                    category="hemodynamic",
+                    measurement_name="Heart Rate",
+                    canonical_test_id="HEART_RATE",
+                    measured_value=bpm,
+                    unit="BPM",
+                    reference_range="50 - 120 BPM",
+                    reference_source="AHA Telemetry Guidelines",
+                    explanation=f"Normal telemetry heart rate: {bpm:g} BPM.",
+                    requires_alert=False,
+                )
+                self.alert_manager.process_clinical_interpretation(
+                    interp,
+                    patient_id=patient_id,
+                    stay_id=stay_id,
+                    patientunitstayid=None,
+                    source="ESP32_TELEMETRY",
+                    trigger_time=reading_time,
+                )
+
+        # 3. SpO2
+        if validity.get("spo2") and spo2 is not None:
+            if spo2 < 88.0:
+                interp = ClinicalInterpretation(
+                    status="CRITICAL_LOW",
+                    severity="CRITICAL",
+                    category="respiratory",
+                    measurement_name="SpO2",
+                    canonical_test_id="SPO2",
+                    measured_value=spo2,
+                    unit="%",
+                    reference_range="92 - 100%",
+                    critical_threshold="< 88%",
+                    reference_source="Surviving Sepsis / Hypoxemia Guidelines",
+                    explanation=f"CRITICAL SEVERE HYPOXEMIA — Telemetry SpO2: {spo2:g}% (< 88%). Urgent airway and oxygen therapy required.",
+                    requires_alert=True,
+                )
+                self.alert_manager.process_clinical_interpretation(
+                    interp,
+                    patient_id=patient_id,
+                    stay_id=stay_id,
+                    patientunitstayid=None,
+                    source="ESP32_TELEMETRY",
+                    trigger_time=reading_time,
+                )
+            elif spo2 < 92.0:
+                interp = ClinicalInterpretation(
+                    status="LOW",
+                    severity="HIGH",
+                    category="respiratory",
+                    measurement_name="SpO2",
+                    canonical_test_id="SPO2",
+                    measured_value=spo2,
+                    unit="%",
+                    reference_range="92 - 100%",
+                    critical_threshold="< 88%",
+                    reference_source="Hypoxemia Guidelines",
+                    explanation=f"HYPOXEMIA — Telemetry SpO2: {spo2:g}% (< 92%). Monitor respiratory effort and supplemental O2.",
+                    requires_alert=True,
+                )
+                self.alert_manager.process_clinical_interpretation(
+                    interp,
+                    patient_id=patient_id,
+                    stay_id=stay_id,
+                    patientunitstayid=None,
+                    source="ESP32_TELEMETRY",
+                    trigger_time=reading_time,
+                )
+            else:
+                interp = ClinicalInterpretation(
+                    status="NORMAL",
+                    category="respiratory",
+                    measurement_name="SpO2",
+                    canonical_test_id="SPO2",
+                    measured_value=spo2,
+                    unit="%",
+                    reference_range="92 - 100%",
+                    reference_source="Hypoxemia Guidelines",
+                    explanation=f"Normal telemetry SpO2: {spo2:g}%.",
+                    requires_alert=False,
+                )
+                self.alert_manager.process_clinical_interpretation(
+                    interp,
+                    patient_id=patient_id,
+                    stay_id=stay_id,
+                    patientunitstayid=None,
+                    source="ESP32_TELEMETRY",
+                    trigger_time=reading_time,
+                )
 
     def get_patient_telemetry(
         self,

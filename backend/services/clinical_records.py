@@ -272,6 +272,7 @@ class ClinicalRecordStore:
                     date_of_birth TEXT,
                     contact_information TEXT,
                     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+                    weight_kg REAL CHECK (weight_kg IS NULL OR (weight_kg > 0 AND weight_kg <= 500)),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -283,6 +284,13 @@ class ClinicalRecordStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_patients_status ON patients (status);"
             )
+            table_info = connection.execute("PRAGMA table_info(patients)").fetchall()
+            col_names = {row["name"] for row in table_info}
+            if "weight_kg" not in col_names:
+                try:
+                    connection.execute("ALTER TABLE patients ADD COLUMN weight_kg REAL;")
+                except sqlite3.OperationalError:
+                    pass
 
             connection.execute(
                 """

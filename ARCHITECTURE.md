@@ -175,3 +175,64 @@ Attributed to Patient!                                               |
 
 ### Identity Abstraction
 The physical ESP32 firmware (`hardware/esp32/TBP_final.ino`) streams formatted telemetry strings without an integrated cryptographic device certificate or unique hardware identifier. The backend bridges this limitation by maintaining registered device entities and mapping physical COM ports to stable logical device identifiers (`SMART_ICU_DEVICE_ID`, default: `ESP32-001`).
+
+---
+
+## 5. Unified Clinical Alert & ML Intelligence Architecture
+
+The Smart ICU platform incorporates a unified clinical alert and intelligence engine synthesizing inputs across 4 primary data streams:
+1. Bedside ESP32 Sensor Telemetry (`ESP32_TELEMETRY`)
+2. Laboratory Blood & Diagnostic Panels (`LAB_RESULT`)
+3. Urine Output Monitoring (`URINE_OUTPUT`)
+4. Nursing & Physician Observations (`NURSE_OBSERVATION`)
+
+```
++-----------------------------------------------------------------------------------+
+|                        ALERT RELATIONAL DATA MODEL                                |
+|                                                                                   |
+|  +-----------------------------------------------------------------------------+  |
+|  |                             clinical_alerts                                 |  |
+|  |  - alert_id (UUID PK)                                                       |  |
+|  |  - patient_id, stay_id, patientunitstayid                                   |  |
+|  |  - source: ESP32_TELEMETRY | LAB_RESULT | URINE_OUTPUT | NURSE_OBSERVATION    |  |
+|  |  - record_id: Nullable UUID referencing clinical_records                    |  |
+|  |  - fingerprint: SHA-256(patient_ref + ":" + source + ":" + canonical_test)   |  |
+|  |  - severity: CRITICAL (4) | HIGH (3) | MODERATE (2) | LOW (1)               |  |
+|  |  - status: ACTIVE | ACKNOWLEDGED | RESOLVED | SUPERSEDED                    |  |
+|  |  - escalation_count: INTEGER DEFAULT 0                                      |  |
+|  |  - trigger_time, acknowledged_at, resolved_at, superseded_by_alert_id         |  |
+|  +-----------------------------------------------------------------------------+  |
+|                                        | 1:N                                      |
+|                                        v                                          |
+|  +-----------------------------------------------------------------------------+  |
+|  |                            alert_audit_logs                                 |  |
+|  |  - log_id (INTEGER PK AUTOINCREMENT)                                        |  |
+|  |  - alert_id (FK -> clinical_alerts.alert_id)                                |  |
+|  |  - action: CREATED | ESCALATED | ACKNOWLEDGED | RESOLVED | SUPERSEDED        |  |
+|  |  - performed_by: Clinician Name or SYSTEM_AUTO_RESOLVE                       |  |
+|  |  - note, timestamp, details_json                                            |  |
+|  +-----------------------------------------------------------------------------+  |
++-----------------------------------------------------------------------------------+
+```
+
+### Deterministic Clinical Rules & Guidelines
+- **KDIGO 2012 AKI Staging:**
+  - Standard duration parsing (`"6 hours"`, `"12h"`, `"24 hours"`).
+  - Rate normalized to $mL/kg/h$ using patient admission weight.
+  - Oliguria thresholds: $< 0.5\text{ mL/kg/h}$ for $\ge 6\text{h}$ (Stage 1), $< 0.5\text{ mL/kg/h}$ for $\ge 12\text{h}$ (Stage 2), $< 0.3\text{ mL/kg/h}$ for $\ge 24\text{h}$ or anuria (Stage 3).
+  - Weight Fallback: Volumetric thresholds ($30\text{ mL/h}$, $10\text{ mL/h}$) with explicit warnings if patient weight is unrecorded.
+- **Canonical Lab Registry:**
+  - Electrolytes (Potassium, Sodium, Chloride, Bicarbonate)
+  - Renal (Creatinine, BUN, Urea)
+  - Hematology (WBC, Platelets, Hemoglobin, Hematocrit)
+  - Metabolic (Glucose, Calcium, Magnesium, Lactate)
+  - Additional panels (e.g. eGFR, Blood Gas) supported via dynamic custom clinician reference ranges.
+  - Grounded in Tietz Textbook of Clinical Chemistry, Surviving Sepsis 2021, AHA, and KDIGO 2012.
+- **Sensor Safeguards & Telemetry Quality:**
+  - Invalid sensor states ($0\text{ BPM}$, $0\%\text{ SpO2}$) are quarantined and never generate false physiological alerts.
+  - Unassigned device telemetry is never attached to patients.
+
+### ML Service Safety Constraints
+- Transparent inspection of `ml/models/` filesystem artifacts.
+- When `deterioration_logistic_v1.joblib` or `anomaly_isolation_forest_v2.joblib` are missing, the service strictly reports `UNAVAILABLE` and prevents synthetic probability fabrication.
+- Target definition for deterioration: `"ICU discharge marked expired within 24 hours"`.

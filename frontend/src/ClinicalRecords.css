@@ -373,3 +373,152 @@
     gap: 2px;
   }
 }
+
+/* Clinical Interpretation & Alert Preview Banners */
+.clinical-interpretation-banner {
+  padding: 14px 16px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.clinical-interpretation-banner.preview {
+  border-style: dashed;
+  background: #f1f5f9;
+}
+
+.clinical-interpretation-banner.status-critical_high,
+.clinical-interpretation-banner.status-critical_low {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  border-left: 5px solid #dc2626;
+}
+
+.clinical-interpretation-banner.status-abnormal_high,
+.clinical-interpretation-banner.status-abnormal_low {
+  background: #fffbeb;
+  border-color: #fde68a;
+  border-left: 5px solid #d97706;
+}
+
+.clinical-interpretation-banner.status-normal {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  border-left: 5px solid #16a34a;
+}
+
+.clinical-interpretation-banner.status-uninterpretable {
+  background: #fff7ed;
+  border-color: #fed7aa;
+  border-left: 5px solid #ea580c;
+}
+
+.interpretation-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.interpretation-live-tag,
+.interpretation-confirmed-tag {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.05em;
+}
+
+.interpretation-live-tag {
+  background: #e0e7ff;
+  color: #3730a3;
+}
+
+.interpretation-confirmed-tag {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.interpretation-badge {
+  font-size: 11px;
+  font-weight: 800;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.interpretation-badge.badge-critical_high,
+.interpretation-badge.badge-critical_low {
+  background: #dc2626;
+  color: #ffffff;
+}
+
+.interpretation-badge.badge-abnormal_high,
+.interpretation-badge.badge-abnormal_low {
+  background: #f59e0b;
+  color: #000000;
+}
+
+.interpretation-badge.badge-normal {
+  background: #16a34a;
+  color: #ffffff;
+}
+
+.interpretation-badge.badge-uninterpretable {
+  background: #ea580c;
+  color: #ffffff;
+}
+
+.interpretation-severity {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.interpretation-severity.severity-critical {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.interpretation-severity.severity-high {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.interpretation-alert-badge {
+  font-size: 11px;
+  font-weight: 700;
+  background: #fee2e2;
+  color: #b91c1c;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.interpretation-explanation {
+  margin: 0;
+  font-size: 13px;
+  color: #1e293b;
+  line-height: 1.4;
+}
+
+.interpretation-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.interpretation-uninterpretable-note {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+  color: #c2410c;
+  font-style: italic;
+}

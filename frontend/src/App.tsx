@@ -8,7 +8,26 @@ import "./App.css";
 import ClinicalRecords from "./ClinicalRecords";
 import PatientManagement from "./PatientManagement";
 import DeviceManagement from "./DeviceManagement";
+import AlertPanel from "./AlertPanel";
 import { API_BASE } from "./api";
+
+type MLStatus = {
+  status: "ONLINE" | "UNAVAILABLE" | "DEGRADED";
+  deterioration_model: {
+    artifact: string;
+    target: string;
+    status: string;
+    loaded: boolean;
+    missing_path: string | null;
+  };
+  anomaly_model: {
+    artifact: string;
+    status: string;
+    loaded: boolean;
+    missing_path: string | null;
+  };
+  diagnostic_notes: string[];
+};
 
 type Summary = {
   total_rows: number;
@@ -424,8 +443,9 @@ function App() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [patients, setPatients] = useState<Patient[]>([]);
   const [activeSection, setActiveSection] = useState<
-    "dashboard" | "patients" | "clinical" | "devices"
+    "dashboard" | "patients" | "clinical" | "devices" | "alerts"
   >("dashboard");
+  const [mlStatus, setMlStatus] = useState<MLStatus | null>(null);
   const [priorityFilter, setPriorityFilter] = useState("all");
 
   const [selectedPatientId, setSelectedPatientId] =
@@ -434,6 +454,21 @@ function App() {
   const [patientHistory, setPatientHistory] = useState<
     PatientHistoryRow[]
   >([]);
+
+  useEffect(() => {
+    async function loadMLStatus() {
+      try {
+        const res = await fetch(`${API_BASE}/api/ml/status`);
+        if (res.ok) {
+          const data: MLStatus = await res.json();
+          setMlStatus(data);
+        }
+      } catch {
+        // ML status offline
+      }
+    }
+    void loadMLStatus();
+  }, []);
 
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -693,6 +728,16 @@ function App() {
         </div>
       </header>
 
+      {mlStatus && mlStatus.status === "UNAVAILABLE" && (
+        <div className="ml-status-banner" role="status">
+          <div className="ml-status-badge">ML OFFLINE</div>
+          <div className="ml-status-text">
+            <strong>Model Artifacts Missing:</strong> Neither <code>deterioration_logistic_v1.joblib</code> nor <code>anomaly_isolation_forest_v2.joblib</code> are deployed.
+            Predictive deterioration target remains strictly <em>ICU discharge marked expired within 24 hours</em>. Deterministic clinical rule guidelines (KDIGO 2012, Tietz, AHA) and hardware safeguards active.
+          </div>
+        </div>
+      )}
+
       <nav className="module-navigation" aria-label="Application sections">
         <button
           type="button"
@@ -721,6 +766,13 @@ function App() {
           onClick={() => setActiveSection("devices")}
         >
           Device Management
+        </button>
+        <button
+          type="button"
+          aria-current={activeSection === "alerts" ? "page" : undefined}
+          onClick={() => setActiveSection("alerts")}
+        >
+          Clinical Alerts
         </button>
       </nav>
 
@@ -751,6 +803,10 @@ function App() {
 
         {activeSection === "devices" && (
           <DeviceManagement />
+        )}
+
+        {activeSection === "alerts" && (
+          <AlertPanel />
         )}
 
         {summary && !loading && !error && activeSection === "dashboard" && (

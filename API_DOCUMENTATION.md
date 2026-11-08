@@ -254,8 +254,145 @@ Updates/corrects an existing record.
 - Requires `expected_version` (optimistic concurrency locking).
 - Requires `change_reason` for clinical audit trail.
 - Preserves previous state in revision history.
+- **Alert Synchronization:** Automatically supersedes obsolete active alerts linked to this record and re-evaluates the revised reading.
 
 ### `DELETE /api/clinical-records/{record_id}`
 Performs a reasoned clinical void.
 - Requires `expected_version`, `voided_by`, and `void_reason`.
 - Record remains stored with a void timestamp and audit reason; the response exposes `voided: true`. Voiding is not permanent deletion.
+- **Alert Synchronization:** Automatically supersedes any active alerts linked to this voided record.
+
+### `POST /api/clinical-records/evaluate`
+Evaluates a clinical record candidate without persisting it (live preview).
+- **Request Body:**
+  ```json
+  {
+    "category": "blood_test",
+    "measurement_name": "Potassium",
+    "value": 6.8,
+    "unit": "mmol/L",
+    "patient_id": 1
+  }
+  ```
+- **Response:**
+  ```json
+  {
+    "status": "CRITICAL_HIGH",
+    "severity": "CRITICAL",
+    "category": "electrolyte",
+    "measurement_name": "Potassium",
+    "measured_value": 6.8,
+    "unit": "mmol/L",
+    "reference_range": "3.5 - 5.0 mmol/L",
+    "critical_threshold": ">= 6.0 mmol/L",
+    "reference_source": "Tietz Textbook of Clinical Chemistry",
+    "explanation": "CRITICAL HIGH: Potassium 6.8 mmol/L exceeds critical threshold >= 6.0 mmol/L (cardiac arrhythmia/arrest risk).",
+    "requires_alert": true
+  }
+  ```
+
+---
+
+## 6. Unified Clinical Alerts API
+
+> **Prototype Security & Identity Limitation:** Alert endpoints, including acknowledgment and resolution, are unauthenticated in this development release. Operator identities (`acknowledged_by` / `clinician_name` and `resolved_by`) are self-reported and not verified by an authentication service. Do not expose these endpoints on public networks without deploying reverse-proxy authentication, JWT verification, and role-based access control.
+
+### `GET /api/alerts`
+Lists clinical alerts from all sources (`ESP32_TELEMETRY`, `LAB_RESULT`, `CLINICAL_OBSERVATION`).
+- **Query Parameters:**
+  - `status`: Filter by `'ACTIVE'`, `'ACKNOWLEDGED'`, `'RESOLVED'`, `'SUPERSEDED'`, or `'ALL'` (default: `'ACTIVE'`).
+  - `severity`: Filter by `'CRITICAL'`, `'HIGH'`, `'MODERATE'`, `'LOW'`, or `'ALL'`.
+  - `source`: Filter by source stream (`'ESP32_TELEMETRY'`, `'LAB_RESULT'`, `'CLINICAL_OBSERVATION'`).
+  - `stay_id`, `patient_id`: Scope to specific ICU stay or registered patient.
+
+### `GET /api/alerts/summary`
+Returns statistical counts of clinical alerts:
+```json
+{
+  "total": 12,
+  "active": 3,
+  "acknowledged": 1,
+  "resolved": 7,
+  "superseded": 1,
+  "critical": 1,
+  "high": 2,
+  "moderate": 1,
+  "low": 0
+}
+```
+
+### `GET /api/alerts/{alert_id}`
+Retrieves an alert by its UUID.
+
+### `GET /api/alerts/{alert_id}/history`
+Retrieves chronological audit log entries for an alert (`CREATED`, `ESCALATED`, `ACKNOWLEDGED`, `RESOLVED`, `SUPERSEDED`), including actor, timestamp, and clinical notes.
+
+### `POST /api/alerts/{alert_id}/acknowledge`
+Transitions an active alert to `ACKNOWLEDGED`.
+- **Request Body (Canonical):**
+  ```json
+  {
+    "acknowledged_by": "Dr. Sarah Chen, MD",
+    "note": "Notified attending physician, initiating repeat lab panel."
+  }
+  ```
+- **Accepted Alias:**
+  ```json
+  {
+    "clinician_name": "Dr. Sarah Chen, MD"
+  }
+  ```
+
+### `POST /api/alerts/{alert_id}/resolve`
+Transitions an alert to `RESOLVED`.
+- **Request Body (Canonical):**
+  ```json
+  {
+    "resolved_by": "Dr. Sarah Chen, MD",
+    "note": "Potassium corrected to 4.2 mmol/L following insulin-glucose infusion."
+  }
+  ```
+- **Accepted Alias:**
+  ```json
+  {
+    "clinician_name": "Dr. Sarah Chen, MD",
+    "resolution_note": "Potassium corrected to 4.2 mmol/L following insulin-glucose infusion."
+  }
+  ```
+
+### `GET /api/patients/{patient_ref}/alerts`
+Retrieves alerts attributed to a registered patient.
+
+### `GET /api/stays/{stay_ref}/alerts`
+Retrieves alerts attributed to an ICU stay.
+
+---
+
+## 7. Machine Learning Status API
+
+### `GET /api/ml/status`
+Inspects the filesystem state of machine learning artifacts and reports deployment status safely without synthesizing probabilities or mock model files.
+- **Response:**
+  ```json
+  {
+    "status": "UNAVAILABLE",
+    "deterioration_model": {
+      "artifact": "ml/models/deterioration_logistic_v1.joblib",
+      "target": "ICU discharge marked expired within 24 hours",
+      "status": "UNAVAILABLE",
+      "loaded": false,
+      "missing_path": "ml\\models\\deterioration_logistic_v1.joblib"
+    },
+    "anomaly_model": {
+      "artifact": "ml/models/anomaly_isolation_forest_v2.joblib",
+      "status": "UNAVAILABLE",
+      "loaded": false,
+      "missing_path": "ml\\models\\anomaly_isolation_forest_v2.joblib"
+    },
+    "diagnostic_notes": [
+      "Missing required artifact: ml\\models\\deterioration_logistic_v1.joblib",
+      "Missing required artifact: ml\\models\\anomaly_isolation_forest_v2.joblib",
+      "ML inference is offline. Deterministic clinical rules (KDIGO, Tietz, AHA) and hardware safeguards remain fully operational."
+    ]
+  }
+  ```

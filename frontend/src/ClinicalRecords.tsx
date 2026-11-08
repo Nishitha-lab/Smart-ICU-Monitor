@@ -15,6 +15,30 @@ type Category =
   | "other_lab"
   | "clinical_observation";
 
+export type ClinicalInterpretation = {
+  status:
+    | "CRITICAL_HIGH"
+    | "CRITICAL_LOW"
+    | "ABNORMAL_HIGH"
+    | "ABNORMAL_LOW"
+    | "NORMAL"
+    | "UNINTERPRETABLE";
+  severity?: "CRITICAL" | "HIGH" | "MODERATE" | "LOW" | null;
+  category: string;
+  measurement_name: string;
+  canonical_test_id?: string | null;
+  measured_value: number | string;
+  unit?: string | null;
+  reference_range?: string | null;
+  critical_threshold?: string | null;
+  reference_source?: string | null;
+  explanation: string;
+  requires_alert: boolean;
+  evaluation_version?: string;
+  evaluated_at?: string;
+  details?: Record<string, unknown>;
+};
+
 type ClinicalRecord = {
   record_id: string;
   patientunitstayid: number;
@@ -37,6 +61,8 @@ type ClinicalRecord = {
   voided_at: string | null;
   voided_by: string | null;
   void_reason: string | null;
+  interpretation?: ClinicalInterpretation | null;
+  alert?: Record<string, unknown> | null;
 };
 
 const CATEGORY_LABELS: Record<Category, string> = {
@@ -165,6 +191,11 @@ export default function ClinicalRecords(props: ClinicalRecordsProps = {}) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+  const [latestInterpretation, setLatestInterpretation] =
+    useState<ClinicalInterpretation | null>(null);
+  const [latestAlert, setLatestAlert] = useState<Record<string, unknown> | null>(null);
+  const [previewInterpretation, setPreviewInterpretation] =
+    useState<ClinicalInterpretation | null>(null);
   const [editingRecord, setEditingRecord] = useState<ClinicalRecord | null>(null);
   const [changeReason, setChangeReason] = useState("");
   const [conflictRecordId, setConflictRecordId] = useState<string | null>(null);
@@ -188,6 +219,62 @@ export default function ClinicalRecords(props: ClinicalRecordsProps = {}) {
   const isNarrativeObservation =
     category === "clinical_observation" &&
     selectedObservationUnit === null;
+
+  const activePreview =
+    !value || isNarrativeObservation ? null : previewInterpretation;
+
+  useEffect(() => {
+    if (!value || isNarrativeObservation) {
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const resolvedUnit =
+          category === "urine_output"
+            ? "mL"
+            : category === "blood_test"
+              ? selectedBloodTestUnit
+              : category === "clinical_observation"
+                ? selectedObservationUnit
+                : unit.trim();
+        const payload = {
+          category,
+          measurement_name:
+            category === "urine_output" ? "Urine output" : measurementName.trim(),
+          value: Number(value),
+          unit: resolvedUnit || null,
+          observation_period:
+            category === "urine_output" ? observationPeriod.trim() || null : null,
+          reference_range:
+            category === "other_lab" ? referenceRange.trim() || null : null,
+          patient_id: props.initialPatientId ? Number(props.initialPatientId) : undefined,
+        };
+        const res = await fetch(`${API_BASE}/api/clinical-records/evaluate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) {
+          const data: ClinicalInterpretation = await res.json();
+          setPreviewInterpretation(data);
+        }
+      } catch {
+        // Ignore preview failure
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [
+    value,
+    category,
+    measurementName,
+    observationPeriod,
+    referenceRange,
+    unit,
+    selectedBloodTestUnit,
+    selectedObservationUnit,
+    isNarrativeObservation,
+    props.initialPatientId,
+  ]);
 
   const historyQuery = useMemo(() => {
     if (!selectedPatientId) return "";
@@ -268,7 +355,7 @@ export default function ClinicalRecords(props: ClinicalRecordsProps = {}) {
         }
         const data: { records: ClinicalRecord[] } = await response.json();
         if (!controller.signal.aborted) {
-          setRecords(data.records);
+          setRecords(data.records ?? []);
           setClinicalApiStatus("available");
         }
       } catch (error) {
@@ -498,7 +585,7 @@ export default function ClinicalRecords(props: ClinicalRecordsProps = {}) {
         }
         const historyData: { records: ClinicalRecord[] } =
           await historyResponse.json();
-        setRecords(historyData.records);
+        setRecords(historyData.records ?? []);
         setRecordsError("");
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unable to void this record.";
@@ -592,6 +679,15 @@ export default function ClinicalRecords(props: ClinicalRecordsProps = {}) {
           typeof detail === "string" ? detail : "Unable to save this record.",
         );
       }
+      const savedResult = await response.json().catch(() => null);
+      if (savedResult?.interpretation) {
+        setLatestInterpretation(savedResult.interpretation);
+      }
+      if (savedResult?.alert) {
+        setLatestAlert(savedResult.alert);
+      } else {
+        setLatestAlert(null);
+      }
       setSuccessMessage(
         editingRecord ? "Clinical record correction saved." : "Clinical record saved.",
       );
@@ -614,7 +710,7 @@ export default function ClinicalRecords(props: ClinicalRecordsProps = {}) {
       }
       const historyData: { records: ClinicalRecord[] } =
         await historyResponse.json();
-      setRecords(historyData.records);
+      setRecords(historyData.records ?? []);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : "Unable to save record.");
     } finally {
@@ -926,6 +1022,83 @@ export default function ClinicalRecords(props: ClinicalRecordsProps = {}) {
                 Reload latest record
               </button>
             )}
+
+            {activePreview && !latestInterpretation && (
+              <div
+                className={`clinical-interpretation-banner preview status-${activePreview.status.toLowerCase()}`}
+                role="region"
+                aria-label="Live Clinical Interpretation Preview"
+              >
+                <div className="interpretation-header">
+                  <span className="interpretation-live-tag">LIVE PREVIEW</span>
+                  <span className={`interpretation-badge badge-${activePreview.status.toLowerCase()}`}>
+                    {activePreview.status.replace("_", " ")}
+                  </span>
+                  {activePreview.severity && (
+                    <span className={`interpretation-severity severity-${activePreview.severity.toLowerCase()}`}>
+                      {activePreview.severity}
+                    </span>
+                  )}
+                </div>
+                <p className="interpretation-explanation">{activePreview.explanation}</p>
+                <div className="interpretation-meta">
+                  {activePreview.reference_range && (
+                    <span><strong>Ref Range:</strong> {activePreview.reference_range}</span>
+                  )}
+                  {activePreview.critical_threshold && (
+                    <span><strong>Critical:</strong> {activePreview.critical_threshold}</span>
+                  )}
+                  {activePreview.reference_source && (
+                    <span><strong>Guideline:</strong> {activePreview.reference_source}</span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {latestInterpretation && (
+              <div
+                className={`clinical-interpretation-banner saved status-${latestInterpretation.status.toLowerCase()}`}
+                role="region"
+                aria-label="Clinical Interpretation Result"
+              >
+                <div className="interpretation-header">
+                  <span className="interpretation-confirmed-tag">EVALUATED</span>
+                  <span className={`interpretation-badge badge-${latestInterpretation.status.toLowerCase()}`}>
+                    {latestInterpretation.status.replace("_", " ")}
+                  </span>
+                  {latestInterpretation.severity && (
+                    <span className={`interpretation-severity severity-${latestInterpretation.severity.toLowerCase()}`}>
+                      {latestInterpretation.severity}
+                    </span>
+                  )}
+                  {latestAlert && (
+                    <span className="interpretation-alert-badge">
+                      🚨 Alert Triggered
+                    </span>
+                  )}
+                </div>
+                <p className="interpretation-explanation">
+                  <strong>{latestInterpretation.measurement_name}:</strong> {latestInterpretation.explanation}
+                </p>
+                <div className="interpretation-meta">
+                  {latestInterpretation.reference_range && (
+                    <span><strong>Reference:</strong> {latestInterpretation.reference_range}</span>
+                  )}
+                  {latestInterpretation.critical_threshold && (
+                    <span><strong>Critical:</strong> {latestInterpretation.critical_threshold}</span>
+                  )}
+                  {latestInterpretation.reference_source && (
+                    <span><strong>Evidence Basis:</strong> {latestInterpretation.reference_source}</span>
+                  )}
+                </div>
+                {latestInterpretation.status === "UNINTERPRETABLE" && (
+                  <p className="interpretation-uninterpretable-note">
+                    ⚠️ Stored as narrative observation without false alarms.
+                  </p>
+                )}
+              </div>
+            )}
+
             <button
               className="clinical-save-button"
               type="submit"
@@ -1012,6 +1185,11 @@ export default function ClinicalRecords(props: ClinicalRecordsProps = {}) {
                   <div>
                     <p className="eyebrow">{CATEGORY_LABELS[record.category]}</p>
                     <h3>{record.measurement_name}</h3>
+                    {record.interpretation && (
+                      <span className={`interpretation-badge badge-${record.interpretation.status.toLowerCase()}`}>
+                        {record.interpretation.status.replace("_", " ")}
+                      </span>
+                    )}
                   </div>
                   <strong className="clinical-record-value">
                     {record.value}{record.unit ? ` ${record.unit}` : ""}

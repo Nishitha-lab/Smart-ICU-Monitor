@@ -199,10 +199,67 @@ You can demonstrate and test the full end-to-end attribution lifecycle without n
 
 ---
 
+## 6. Unified Clinical Alert & ML Intelligence Engine
+
+The platform integrates a continuous clinical interpretation and deterministic alert engine synthesizing multiple data streams:
+
+```
++-----------------------------------------------------------------------------------+
+|                        CLINICAL DATA INGESTION STREAMS                            |
+|   1. ESP32 Sensor Telemetry   2. Lab Results   3. Urine Output   4. Observations  |
++-----------------------------------------+-----------------------------------------+
+                                          |
+                                          v
++-----------------------------------------------------------------------------------+
+|                     CLINICAL ALERT ENGINE (DETERMINISTIC)                         |
+|  - KDIGO 2012 AKI Criteria (Duration-dependent urine output; weight-adjusted)      |
+|  - Canonical Lab Registry (Electrolytes, Renal, Hematology, Metabolic; Tietz/AHA) |
+|  - Vital Signs Rules (Bradycardia/Tachycardia, Hypoxemia, IV Fluid Depletion)     |
+|  - Quality Masking: Disconnected sensors (BPM/SpO2 == 0) never trigger false alarm|
++-----------------------------------------+-----------------------------------------+
+                                          |
+                                          v
++-----------------------------------------------------------------------------------+
+|                     ALERT MANAGER & AUDIT LIFECYCLE                               |
+|  - Fingerprint Deduplication (SHA-256: stay_id + source + measurement)             |
+|  - Severity Escalation (Increments counter and elevates severity when deteriorating)|
+|  - Auto-Resolution (Subsequent normal reading auto-resolves ACTIVE alert with log)|
+|  - Record Revision Synchronization (Correcting/voiding records supersedes alerts)  |
+|  - Clinician Action (Acknowledge & Resolve with mandatory clinician audit note)   |
++-----------------------------------------------------------------------------------+
+```
+
+### KDIGO 2012 Urine Output Criteria
+- Evaluates rate in $mL/kg/h$ using patient's weight from admissions record:
+  - **Stage 1 (Moderate Risk):** $< 0.5\text{ mL/kg/h}$ for $\ge 6$ hours.
+  - **Stage 2 (High Risk):** $< 0.5\text{ mL/kg/h}$ for $\ge 12$ hours.
+  - **Stage 3 (Critical / Anuria):** $< 0.3\text{ mL/kg/h}$ for $\ge 24$ hours OR total anuria ($\le 10\text{ mL}$) for $\ge 12$ hours.
+- **Weight Fallback:** If patient body weight is unrecorded, evaluates volumetric rate ($mL/h$) using $30\text{ mL/h}$ (oliguria) and $10\text{ mL/h}$ (anuria) with explicit warning in the explanation.
+
+### Canonical Laboratory Reference Registry
+- 15 Standard canonical tests: Potassium, Sodium, Chloride, Bicarbonate, Creatinine, BUN, Urea, Hemoglobin, Hematocrit, WBC, Platelets, Glucose, Calcium, Magnesium, Lactate.
+- Each test defines normal reference ranges, critical high/low thresholds, acceptable clinical units with automatic mathematical normalization (e.g. $\text{WBC/Platelets } /\mu L \rightarrow K/\mu L$, $\text{Lactate } mg/dL \rightarrow mmol/L$, $\text{Urea } mmol/L \rightarrow mg/dL$), and canonical evidence sources (Tietz Textbook of Clinical Chemistry, Surviving Sepsis 2021, KDIGO 2012, AHA, AABB).
+- Additional panels (e.g. eGFR, Arterial Blood Gases, Troponin) are dynamically evaluated using clinician-provided custom reference ranges, or preserved safely as uninterpreted results without false alarms.
+
+### Telemetry Alert Evaluation & Hardware Safeguards
+- Evaluates valid bedside sensor telemetry attributed to registered ICU stays:
+  - **IV Fluid Level:** $\le 200\text{ mL}$ (Critical), $\le 350\text{ mL}$ (Moderate).
+  - **SpO2:** $< 88\%$ (Critical Hypoxemia), $< 92\%$ (High Hypoxemia).
+  - **Heart Rate:** $< 40$ or $> 140\text{ BPM}$ (Critical), $< 50$ or $> 120\text{ BPM}$ (Moderate).
+- **Sensor Quality Masking:** Hardware disconnections ($0\text{ BPM}$ or $0\%\text{ SpO2}$) are masked to `None` and do NOT trigger false physiological bradycardia or hypoxemia alerts. Unassigned telemetry is never attributed to patients.
+
+### Machine Learning Engine Safety Status
+- The expected model artifacts `ml/models/deterioration_logistic_v1.joblib` and `ml/models/anomaly_isolation_forest_v2.joblib` are **not present in the repository**.
+- In strict adherence to clinical safety principles, the system **does not synthesize mock weights or fabricate artificial probabilities**.
+- The ML Service transparently reports `status: "UNAVAILABLE"` with diagnostic notes, and the UI displays an informational status banner noting deterministic clinical rules and hardware buzzer safeguards are active.
+- Ground truth target for deterioration models remains strictly: `"ICU discharge marked expired within 24 hours"`.
+
+---
+
 ## 7. REST API Reference
 
 ### Patients
-- `POST /api/patients` - Register a patient (`name`, `patient_code`, `age`, `sex`, `date_of_birth`, `contact_information`).
+- `POST /api/patients` - Register a patient (`name`, `patient_code`, `age`, `sex`, `date_of_birth`, `contact_information`, `weight_kg`).
 - `GET /api/patients?source=registered&status=active&search=P001` - List registered patients with active stay and device metadata.
 - `GET /api/registered-patients/{id}` - Retrieve patient profile, admission history, device assignments, and latest telemetry.
 - `PATCH /api/patients/{id}` - Update patient demographics.
@@ -231,39 +288,57 @@ You can demonstrate and test the full end-to-end attribution lifecycle without n
 - `GET /api/patients/{id}/timeline` - Retrieve unified chronological audit timeline (admissions, discharges, assignments, clinical records).
 
 ### Clinical Observations & Lab Records
-- `POST /api/clinical-records` - Record urine output, blood tests, or observations.
+- `POST /api/clinical-records` - Record urine output, blood tests, or observations. Automatically evaluates interpretation and triggers alerts.
 - `GET /api/patients/{patient_id}/clinical-records` - Retrieve clinical records for patient.
 - `GET /api/stays/{stay_id}/clinical-records` - Retrieve clinical records for stay.
 - `GET /api/clinical-records/{id}` - Retrieve record.
-- `PUT /api/clinical-records/{id}` - Correct record with version check and audit reason.
-- `DELETE /api/clinical-records/{id}` - Reasoned void of record.
+- `PUT /api/clinical-records/{id}` - Correct record with version check; supersedes obsolete alerts and re-evaluates.
+- `DELETE /api/clinical-records/{id}` - Reasoned void of record; supersedes associated active alerts.
+- `POST /api/clinical-records/evaluate` - Live interpretation preview before saving.
+
+### Unified Alerts & ML Status
+- `GET /api/alerts` - List clinical alerts with optional `status`, `severity`, `source`, `patient_id`, `stay_id` filters.
+- `GET /api/alerts/summary` - Statistical breakdown (active, critical, acknowledged, resolved).
+- `GET /api/alerts/{alert_id}` - Retrieve alert record.
+- `GET /api/alerts/{alert_id}/history` - Retrieve audit log history for alert.
+- `POST /api/alerts/{alert_id}/acknowledge` - Clinician acknowledgment (`clinician_name`).
+- `POST /api/alerts/{alert_id}/resolve` - Clinician resolution (`clinician_name`, `resolution_note`).
+- `GET /api/patients/{patient_ref}/alerts` - Patient-filtered alerts.
+- `GET /api/stays/{stay_ref}/alerts` - Stay-filtered alerts.
+- `GET /api/ml/status` - Inspection of ML artifacts, loaded state, and diagnostic notes.
 
 ---
 
 ## 8. Automated Testing & Verification
 
-The codebase includes comprehensive unit, integration, attribution safety, and UI component tests:
+The codebase includes comprehensive unit, integration, attribution safety, lifecycle, and UI component tests:
 
-### Run Backend Tests (86 tests)
+### Run Backend Tests (139 tests)
 ```powershell
-cd D:\Smart-ICU\backend
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+$env:PYTHONPATH="backend"
+& "backend/.venv/Scripts/pytest.exe" backend/tests
 ```
-- The current suite contains 86 tests covering identifier separation, patient-stay ownership, clinical records, patient lifecycle, device assignment, telemetry attribution, concurrency, and serial reliability.
+- **139 automated tests** covering:
+  - `test_clinical_alert_engine.py`: KDIGO urine output, canonical lab registry, vitals rules, custom reference range parsing, duration parsing.
+  - `test_alert_manager.py`: Alert lifecycle, deduplication fingerprinting, escalation, auto-resolution on normal reading, manual acknowledge/resolve, record revision/voiding synchronization.
+  - `test_ml_safety.py`: ML status reporting, missing artifact diagnostics, deterrence of synthetic score fabrication.
+  - `test_telemetry_alerts.py`: Bedside IV fluid and vital alerts, quality masking, patient attribution isolation.
+  - `test_alert_api.py`: REST API integration for alerts, summary, triage, and record evaluation.
+  - Plus all 86 original regression tests for patient lifecycle, admissions, device assignment, and concurrency.
 
-### Run Frontend Tests & Checks (32 tests)
+### Run Frontend Tests & Checks (39 tests)
 ```powershell
 cd D:\Smart-ICU\frontend
 npm test -- --run
-npm run lint
 npm run build
 ```
-- 9 tests in `App.test.tsx` (eICU dashboard, triage, hardware banners).
-- 13 tests in `ClinicalRecords.test.tsx` (record creation, identifier integrity, optimistic locking, voiding).
-- 5 tests in `PatientManagement.test.tsx` (patient list, register modal, detail view, discharge, stale request handling).
-- 5 tests in `DeviceManagement.test.tsx` (device list, registration modal, assignment modal, unassign, simulator).
-- **ESLint:** 0 errors, 0 warnings.
-- **TypeScript & Vite Build:** 100% clean production bundle.
+- **39 automated tests** covering:
+  - `AlertPanel.test.tsx`: Stat cards, status/severity/source filtering, 7-question diagnostic inspection, clinician acknowledgment, clinician resolution.
+  - `ClinicalInterpretation.test.tsx`: Live interpretation preview while typing, evaluated interpretation banner with evidence upon submission.
+  - `ClinicalRecords.test.tsx`: Manual record entry, unit normalization, optimistic concurrency locking, voiding.
+  - `App.test.tsx`: Command center, eICU triage, hardware telemetry banner, ML status banner.
+  - `PatientManagement.test.tsx` & `DeviceManagement.test.tsx`: Lifecycle and assignment operations.
+- **TypeScript & Vite Build:** 100% clean production bundle (`tsc -b && vite build` in ~160ms).
 
 ---
 

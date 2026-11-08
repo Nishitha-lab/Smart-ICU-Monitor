@@ -6,6 +6,9 @@ from typing import Literal
 from uuid import UUID
 
 from services.serial_service import serial_monitor
+from services.clinical_alert_engine import clinical_alert_engine, ClinicalInterpretation
+from services.alert_manager import AlertManager, AlertAcknowledgeRequest, AlertResolveRequest
+from services.ml_service import ml_service
 from services.clinical_records import (
     ClinicalCategory,
     ClinicalRecordConflict,
@@ -29,6 +32,7 @@ from services.patient_service import (
 )
 
 import pandas as pd
+from pydantic import BaseModel, Field
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -50,6 +54,7 @@ if not CLINICAL_DB_FILE.is_absolute():
     CLINICAL_DB_FILE = ROOT / CLINICAL_DB_FILE
 clinical_record_store = ClinicalRecordStore(CLINICAL_DB_FILE)
 patient_store = PatientStore(CLINICAL_DB_FILE)
+alert_manager = AlertManager(CLINICAL_DB_FILE)
 
 
 # ============================================================
@@ -64,6 +69,7 @@ async def lifespan(app: FastAPI):
     print(f"Loaded {len(df):,} patient-hour rows from {df['patientunitstayid'].nunique():,} ICU stays.")
     patient_store.initialize()
     clinical_record_store.initialize()
+    alert_manager.initialize()
     serial_monitor.set_on_reading(patient_store.ingest_reading)
     serial_monitor.start()
     try:
@@ -301,6 +307,78 @@ def get_clinical_record_patient_stays(
     return {"patient_ids": patient_ids.head(limit).astype(int).tolist()}
 
 
+def evaluate_record_for_alerts(
+    record_dict: dict,
+    record_obj: Any,
+    patient_id: int | None,
+    stay_id: int | None,
+    patientunitstayid: int | None,
+):
+    try:
+        weight_kg = None
+        patient_sex = None
+        patient_age = None
+        if patient_id:
+            pat = patient_store.get_patient(patient_id)
+            if pat:
+                weight_kg = pat.get("weight_kg")
+                patient_sex = pat.get("sex")
+                patient_age = pat.get("age")
+
+        cat = getattr(record_obj, "category", record_dict.get("category"))
+        meas_name = getattr(record_obj, "measurement_name", record_dict.get("measurement_name"))
+        val = getattr(record_obj, "value", record_dict.get("value"))
+        unit = getattr(record_obj, "unit", record_dict.get("unit"))
+        obs_period = getattr(record_obj, "observation_period", record_dict.get("observation_period"))
+        ref_range = getattr(record_obj, "reference_range", record_dict.get("reference_range"))
+        meas_time = getattr(record_obj, "measurement_time", None)
+        sample_time = getattr(record_obj, "sample_collection_time", None)
+
+        if cat == "urine_output":
+            interp = clinical_alert_engine.evaluate_urine_output(
+                volume_ml=float(val) if isinstance(val, (int, float)) else 0.0,
+                unit=unit or "mL",
+                patient_weight_kg=weight_kg,
+                observation_period=obs_period,
+                start_time=sample_time,
+                end_time=meas_time,
+            )
+            source = "CLINICAL_OBSERVATION"
+        elif cat in ("blood_test", "other_lab"):
+            interp = clinical_alert_engine.evaluate_lab_result(
+                measurement_name=meas_name,
+                value=val,
+                unit=unit,
+                reference_range_str=ref_range,
+                patient_sex=patient_sex,
+                patient_age=patient_age,
+            )
+            source = "LAB_RESULT"
+        else:
+            interp = clinical_alert_engine.evaluate_clinical_observation(
+                measurement_name=meas_name,
+                value=val,
+                unit=unit,
+            )
+            source = "CLINICAL_OBSERVATION"
+
+        trig_iso = meas_time.isoformat() if hasattr(meas_time, "isoformat") else str(meas_time or "")
+        alert = alert_manager.process_clinical_interpretation(
+            interpretation=interp,
+            patient_id=patient_id,
+            stay_id=stay_id,
+            patientunitstayid=patientunitstayid,
+            source=source,
+            record_id=record_dict.get("record_id"),
+            trigger_time=trig_iso or None,
+        )
+        return interp, alert
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception("Error evaluating clinical record for alerts: %s", exc)
+        return None, None
+
+
 @app.post("/api/clinical-records", status_code=201)
 def create_clinical_record(record: ClinicalRecordCreate):
     if record.stay_id is not None and record.patientunitstayid is not None:
@@ -338,11 +416,24 @@ def create_clinical_record(record: ClinicalRecordCreate):
         raise HTTPException(status_code=422, detail="Either stay_id or patientunitstayid is required.")
 
     try:
-        return clinical_record_store.create(record)
+        created = clinical_record_store.create(record)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    interp, alert = evaluate_record_for_alerts(
+        record_dict=created,
+        record_obj=record,
+        patient_id=record.patient_id,
+        stay_id=record.stay_id,
+        patientunitstayid=record.patientunitstayid,
+    )
+    if interp:
+        created["interpretation"] = interp.model_dump()
+    if alert:
+        created["alert"] = alert
+    return created
 
 
 @app.get("/api/patients/{patient_ref}/clinical-records")
@@ -603,6 +694,26 @@ def update_clinical_record(record_id: UUID, record: ClinicalRecordUpdate):
             status_code=404,
             detail="Clinical record not found or already voided.",
         )
+
+    # Supersede previous active alerts linked to this record
+    alert_manager.supersede_alerts_for_record(
+        record_id=str(record_id),
+        reason=f"Superseded by record revision: {record.change_reason}",
+        voided_by=record.entered_by,
+    )
+
+    # Re-evaluate the updated record
+    interp, alert = evaluate_record_for_alerts(
+        record_dict=updated,
+        record_obj=record,
+        patient_id=updated.get("patient_id"),
+        stay_id=updated.get("stay_id"),
+        patientunitstayid=updated.get("patientunitstayid"),
+    )
+    if interp:
+        updated["interpretation"] = interp.model_dump()
+    if alert:
+        updated["alert"] = alert
     return updated
 
 
@@ -622,6 +733,13 @@ def void_clinical_record(
         raise HTTPException(status_code=409, detail=str(error)) from error
     if voided is None:
         raise HTTPException(status_code=404, detail="Clinical record not found.")
+
+    # Voiding a record marks its active alerts as superseded
+    alert_manager.supersede_alerts_for_record(
+        record_id=str(record_id),
+        reason=f"Clinical record voided: {void.void_reason}",
+        voided_by=void.voided_by,
+    )
     return voided
 
 
@@ -1410,3 +1528,182 @@ def get_patient_latest(
                 ]
         }
     }
+
+
+# ============================================================
+# UNIFIED CLINICAL ALERTS API
+# ============================================================
+
+@app.get("/api/alerts")
+def get_alerts(
+    patient_id: int | None = Query(default=None),
+    stay_id: int | None = Query(default=None),
+    patientunitstayid: int | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    source: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    alerts = alert_manager.list_alerts(
+        patient_id=patient_id,
+        stay_id=stay_id,
+        patientunitstayid=patientunitstayid,
+        severity=severity,
+        source=source,
+        status=status,
+        category=category,
+        limit=limit,
+        offset=offset,
+    )
+    return {"alerts": alerts}
+
+
+@app.get("/api/alerts/summary")
+def get_alerts_summary():
+    return alert_manager.get_summary()
+
+
+@app.get("/api/alerts/{alert_id}")
+def get_alert_by_id(alert_id: str):
+    alert = alert_manager.get_alert(alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail=f"Alert '{alert_id}' not found.")
+    return alert
+
+
+@app.get("/api/alerts/{alert_id}/history")
+def get_alert_history(alert_id: str):
+    alert = alert_manager.get_alert(alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail=f"Alert '{alert_id}' not found.")
+    return {"alert_id": alert_id, "history": alert_manager.get_alert_history(alert_id)}
+
+
+@app.post("/api/alerts/{alert_id}/acknowledge")
+def acknowledge_alert(alert_id: str, req: AlertAcknowledgeRequest):
+    try:
+        updated = alert_manager.acknowledge_alert(
+            alert_id=alert_id,
+            acknowledged_by=req.acknowledged_by,
+            note=req.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Alert '{alert_id}' not found.")
+    return updated
+
+
+@app.post("/api/alerts/{alert_id}/resolve")
+def resolve_alert(alert_id: str, req: AlertResolveRequest):
+    try:
+        updated = alert_manager.resolve_alert(
+            alert_id=alert_id,
+            resolved_by=req.resolved_by,
+            note=req.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Alert '{alert_id}' not found.")
+    return updated
+
+
+@app.get("/api/patients/{patient_ref}/alerts")
+def get_patient_alerts(
+    patient_ref: int | str,
+    status: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    pid = patient_store.resolve_patient_id(patient_ref)
+    punit = None
+    if pid is None:
+        try:
+            punit = int(patient_ref)
+        except ValueError:
+            pass
+    if pid is None and punit is None:
+        raise HTTPException(status_code=404, detail=f"Patient '{patient_ref}' not found.")
+
+    alerts = alert_manager.list_alerts(
+        patient_id=pid,
+        patientunitstayid=punit,
+        status=status,
+        severity=severity,
+        limit=limit,
+    )
+    return {"alerts": alerts}
+
+
+@app.get("/api/stays/{stay_ref}/alerts")
+def get_stay_alerts(
+    stay_ref: int | str,
+    status: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    stay_id = patient_store.resolve_stay_id(stay_ref)
+    if stay_id is None:
+        raise HTTPException(status_code=404, detail=f"ICU stay '{stay_ref}' not found.")
+    alerts = alert_manager.list_alerts(
+        stay_id=stay_id,
+        status=status,
+        severity=severity,
+        limit=limit,
+    )
+    return {"alerts": alerts}
+
+
+class EvaluateRequest(BaseModel):
+    category: str
+    measurement_name: str
+    value: float | str
+    unit: str | None = None
+    observation_period: str | None = None
+    reference_range: str | None = None
+    patient_id: int | None = None
+    weight_kg: float | None = None
+
+
+@app.post("/api/clinical-records/evaluate")
+def preview_clinical_evaluation(req: EvaluateRequest):
+    weight = req.weight_kg
+    if weight is None and req.patient_id:
+        pat = patient_store.get_patient(req.patient_id)
+        if pat:
+            weight = pat.get("weight_kg")
+
+    if req.category == "urine_output":
+        val_f = float(req.value) if isinstance(req.value, (int, float)) else 0.0
+        interp = clinical_alert_engine.evaluate_urine_output(
+            volume_ml=val_f,
+            unit=req.unit or "mL",
+            patient_weight_kg=weight,
+            observation_period=req.observation_period,
+        )
+    elif req.category in ("blood_test", "other_lab"):
+        interp = clinical_alert_engine.evaluate_lab_result(
+            measurement_name=req.measurement_name,
+            value=req.value,
+            unit=req.unit,
+            reference_range_str=req.reference_range,
+        )
+    else:
+        interp = clinical_alert_engine.evaluate_clinical_observation(
+            measurement_name=req.measurement_name,
+            value=req.value,
+            unit=req.unit,
+        )
+    return interp.model_dump()
+
+
+# ============================================================
+# ML INTELLIGENCE STATUS API
+# ============================================================
+
+@app.get("/api/ml/status")
+def get_ml_status():
+    return ml_service.get_status()
