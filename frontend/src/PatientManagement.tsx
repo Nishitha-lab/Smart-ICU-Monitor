@@ -7,6 +7,7 @@ import {
 } from "react";
 import { API_BASE } from "./api";
 import ClinicalRecords from "./ClinicalRecords";
+import DataConsistencyPanel from "./DataConsistencyPanel";
 import "./PatientManagement.css";
 
 export type PatientListItem = {
@@ -887,6 +888,14 @@ export default function PatientManagement() {
                     }}
                   />
                 </div>
+              )}
+
+              {/* Clinical Data Consistency & Intelligence Engine */}
+              {patientDetail.active_stay && (
+                <DataConsistencyPanel
+                  patientId={patientDetail.id}
+                  stayId={patientDetail.active_stay.id}
+                />
               )}
 
               {/* Stay History Table */}

@@ -32,6 +32,12 @@ CLINICAL_OBSERVATION_UNITS = {
     "Respiratory rate": "breaths/min",
     "Systolic blood pressure": "mmHg",
     "Diastolic blood pressure": "mmHg",
+    "Heart rate": "bpm",
+    "Pulse": "bpm",
+    "Oxygen saturation": "%",
+    "SpO2": "%",
+    "IV fluid infusion": "mL",
+    "Intake volume": "mL",
     "Consciousness / general observation": None,
     "Clinical note": None,
 }

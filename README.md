@@ -150,17 +150,24 @@ From PowerShell:
 ```powershell
 cd D:\Smart-ICU\backend
 py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
+
+> [!IMPORTANT]
+> **Dedicated Virtual Environment Required:**
+> Always execute backend services and tests using the dedicated virtual environment (`D:\Smart-ICU\backend\.venv\Scripts\python.exe` or by activating `.\backend\.venv\Scripts\Activate.ps1`). Do **NOT** invoke backend services or tests using unactivated system Python directly, as model artifacts are pinned to `scikit-learn==1.9.0`.
 
 ### 2. Start the Backend API
 ```powershell
 cd D:\Smart-ICU\backend
-.\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\Activate.ps1
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 - API Base: `http://127.0.0.1:8000`
 - Interactive OpenAPI Docs: `http://127.0.0.1:8000/docs`
 - Health Check: `http://127.0.0.1:8000/health`
+
 
 ### 3. Frontend Setup & Launch
 In a second PowerShell terminal:
@@ -267,8 +274,25 @@ The platform integrates a continuous clinical interpretation and deterministic a
   - Positive ICU stays never flagged: **5** (Stays: 176730, 827085, 1073098, 1109136, 2901384).
 - **Experimental Risk Bands:** Low ($p < 0.05$), Moderate ($0.05 \le p < 0.15$), High ($0.15 \le p < 0.30$), Extreme ($p \ge 0.30$). These are presentation categories, not validated clinical severity classifications.
 - **Explainability:** Exact signed log-odds attribution ($\text{logit}(p) = \beta_0 + \sum \phi_j$) exposing `model_intercept` and `predicted_log_odds` down to the API.
-- **Model Artifact Provenance & Manifest:** The five current model artifacts were hashed and their file sizes and SHA-256 checksums recorded. These values match the current release manifest. Historical identity with an earlier trained baseline could not be independently established because the artifacts are not present in the available Git history.
 - **Offline Isolation:** Historical eICU models do not ingest live serial telemetry, preserving deterministic clinical rule safety.
+
+### Model Serialization & Runtime Compatibility Matrix
+
+For complete technical specifications, see [docs/MODEL_COMPATIBILITY.md](docs/MODEL_COMPATIBILITY.md).
+
+| Artifact | Artifact Path | Training `scikit-learn` | Model Type | Deployment Status | Dedicated Env (`backend\.venv`, 1.9.0) | System Python (`1.8.0`) |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **Baseline Deterioration v1** | `ml/models/deterioration_logistic_v1.joblib` | **`1.9.0`** | `LogisticRegression` Pipeline | **ACTIVE DEFAULT** | **SUPPORTED** (0 warnings) | **WARNING** (`InconsistentVersionWarning` $\times 4$; numerically equivalent) |
+| **Anomaly Isolation Forest v2** | `ml/models/anomaly_isolation_forest_v2.joblib` | **`1.9.0`** | `IsolationForest` Pipeline | **ACTIVE DEFAULT** | **SUPPORTED** (0 warnings) | **WARNING** (`InconsistentVersionWarning` $\times 304$; bit-for-bit identical) |
+| **Candidate Deterioration v2** | `ml/candidate_artifacts_v2/deterioration_candidate_v2.joblib` | **`1.8.0`** | `HistGradientBoosting` + Platt | **UNPROMOTED CANDIDATE** | **UNSUPPORTED** (Fails: `ModuleNotFoundError: No module named '_loss'`) | **SUPPORTED** (0 warnings; 13/13 candidate tests pass) |
+
+#### Key Technical Context:
+- **Dedicated Virtual Environment:** The backend environment (`D:\Smart-ICU\backend\.venv`) uses `scikit-learn==1.9.0`. Both baseline production models load cleanly without warnings.
+- **System Environment:** Unactivated system Python uses `scikit-learn 1.8.0`. Loading baseline models in 1.8.0 produces native `InconsistentVersionWarning`s.
+- **Empirical Numerical Equivalence:** Side-by-side empirical testing confirmed that on tested cross-version inputs, Isolation Forest scores and decision functions are identical bit-for-bit to 17 decimal places (variance $= 0.0$), and Logistic Regression v1 probabilities match within floating-point epsilon ($\le 3 \times 10^{-17}$).
+- **Candidate v2 Deserialization Limitation:** Candidate v2 was serialized under 1.8.0 and cannot be deserialized under 1.9.0 due to internal Cython loss module restructuring (`ModuleNotFoundError: No module named '_loss'`). Candidate v2 must be tested in a 1.8.0 environment until formally retrained under 1.9.0 upon promotion.
+- **Upstream Caveat:** Cross-version model persistence via pickle/joblib is officially unsupported by scikit-learn. Numerical equivalence on selected test inputs is not a guarantee of universal compatibility.
+- **Warning Visibility:** `InconsistentVersionWarning` is intentionally not suppressed to preserve auditability when running in non-standard environments.
 
 ---
 
@@ -329,19 +353,38 @@ The platform integrates a continuous clinical interpretation and deterministic a
 
 The codebase includes comprehensive unit, integration, attribution safety, lifecycle, and UI component tests:
 
-### Run Backend Tests (154 tests)
+### Run Backend Tests (225 tests)
 ```powershell
-$env:PYTHONPATH="backend"
-& "backend/.venv/Scripts/pytest.exe" backend/tests -v
+cd D:\Smart-ICU
+.\backend\.venv\Scripts\Activate.ps1
+pytest backend/tests -v -o pythonpath="backend ."
 ```
-- **154 automated tests** covering:
+Or directly:
+```powershell
+& "D:\Smart-ICU\backend\.venv\Scripts\python.exe" -m pytest backend/tests -v -o pythonpath="backend ."
+```
+
+> [!CAUTION]
+> **Do NOT run backend tests using unactivated system Python.**
+> The backend test suite relies on `scikit-learn==1.9.0` pinned in `backend/.venv`. Running under system Python (1.8.0) triggers `InconsistentVersionWarning` on baseline models and causes version mismatches.
+
+- **225 automated backend tests** covering:
   - `test_clinical_alert_engine.py`: KDIGO urine output, canonical lab registry, vitals rules, custom reference range parsing, duration parsing.
   - `test_alert_manager.py`: Alert lifecycle, deduplication fingerprinting, escalation, auto-resolution on normal reading, manual acknowledge/resolve, record revision/voiding synchronization.
+  - `test_data_consistency_engine.py` & `test_consistency_api.py`: Multi-source clinical data consistency, ESP32 vs manual entry verification, tolerance checking, unit conversion.
+  - `test_historical_reference_engine.py` & `test_patient_trend_analyzer.py`: Historical eICU population baseline comparisons, moving patient trend analysis, rate-of-change boundaries, and Isolation Forest anomaly scoring.
   - `test_ml_engine.py`: Serialized model inference, probability bounds, mathematical log-odds attribution, anomaly scoring, REST prediction endpoint.
   - `test_ml_safety.py`: ML status reporting, missing artifact diagnostics, deterrence of synthetic score fabrication.
   - `test_telemetry_alerts.py`: Bedside IV fluid and vital alerts, quality masking, patient attribution isolation.
-  - `test_alert_api.py`: REST API integration for alerts, summary, triage, and record evaluation.
+  - `test_telemetry_timestamp_validation.py`: P1 timestamp validation, UTC normalization, rejection of unparseable/future timestamps.
   - Plus all regression tests for patient lifecycle, admissions, device assignment, concurrency, and stress bursts.
+  - *Candidate v2 Evaluation Suite (1.8.0):* Run via dedicated candidate evaluation environment:
+    ```powershell
+    .\ml\.venv_candidate\Scripts\Activate.ps1
+    pytest backend/tests/test_ml_candidate_inference.py -v -o pythonpath="backend ."
+    ```
+    *(All 13 candidate inference tests pass with 100% success)*
+
 
 ### Run Frontend Tests & Checks (46 tests)
 ```powershell

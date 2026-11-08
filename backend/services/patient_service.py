@@ -491,6 +491,8 @@ class PatientStore:
                 (now_iso, now_iso),
             )
         self.alert_manager.initialize()
+        from services.clinical_data_intelligence import ClinicalDataIntelligenceCoordinator
+        ClinicalDataIntelligenceCoordinator(self.database_path).initialize()
 
     # ------------------------------------------------------------
     # PATIENT OPERATIONS
@@ -1589,8 +1591,24 @@ class PatientStore:
                 )
             except Exception:
                 pass
+            try:
+                self._evaluate_consistency_and_trends(
+                    patient_id=patient_id,
+                )
+            except Exception:
+                pass
 
         return self._mask_invalid_telemetry(res)
+
+    def _evaluate_consistency_and_trends(self, patient_id: int) -> None:
+        try:
+            from services.clinical_data_intelligence import ClinicalDataIntelligenceCoordinator
+            coordinator = ClinicalDataIntelligenceCoordinator(
+                self.database_path, alert_manager=self.alert_manager
+            )
+            coordinator.evaluate_patient(patient_id)
+        except Exception:
+            pass
 
     def _evaluate_telemetry_alerts(
         self,

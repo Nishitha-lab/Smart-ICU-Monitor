@@ -67,6 +67,7 @@ class MLService:
         self._cached_metrics_data: dict[str, Any] | None = None
         self._cached_candidate_model: dict[str, Any] | None = None
         self._cached_candidate_metrics: dict[str, Any] | None = None
+        self._candidate_load_error: str | None = None
 
     def _load_comparison_metrics(self) -> dict[str, Any] | None:
         if self._cached_metrics_data is not None:
@@ -112,9 +113,16 @@ class MLService:
         try:
             import joblib
             self._cached_candidate_model = joblib.load(CANDIDATE_ARTIFACT)
+            self._candidate_load_error = None
             return self._cached_candidate_model
-        except Exception:
+        except Exception as exc:
+            import sklearn
+            self._candidate_load_error = (
+                f"Candidate artifact was serialized under scikit-learn 1.8.0 and cannot be deserialized "
+                f"under scikit-learn {sklearn.__version__}: {type(exc).__name__}: {exc}"
+            )
             return None
+
 
     def _load_candidate_metrics(self) -> dict[str, Any] | None:
         if self._cached_candidate_metrics is not None:
@@ -201,10 +209,24 @@ class MLService:
 
         cand_bundle = self._get_candidate_bundle() if cand_exists else None
         cand_metrics = self._load_candidate_metrics()
+        is_runtime_compatible = cand_bundle is not None
+
+        import sklearn
         if cand_exists:
-            diagnostic_notes.append(
-                f"Candidate v2 model '{CANDIDATE_ARTIFACT.name}' detected (unpromoted; historical eICU inference only)."
-            )
+            if is_runtime_compatible:
+                cand_status_str = "AVAILABLE_FOR_EVALUATION"
+                diagnostic_notes.append(
+                    f"Candidate v2 model '{CANDIDATE_ARTIFACT.name}' detected and loadable in current runtime "
+                    f"(unpromoted; historical eICU inference only)."
+                )
+            else:
+                cand_status_str = "UNAVAILABLE_INCOMPATIBLE_RUNTIME"
+                diagnostic_notes.append(
+                    f"Candidate v2 model '{CANDIDATE_ARTIFACT.name}' is present on disk but UNAVAILABLE in this runtime "
+                    f"(serialized with scikit-learn 1.8.0, incompatible with current scikit-learn {sklearn.__version__})."
+                )
+        else:
+            cand_status_str = "UNAVAILABLE"
 
         cand_status = {
             "artifact": CANDIDATE_ARTIFACT.name,
@@ -212,27 +234,35 @@ class MLService:
             "model_name": cand_bundle.get("model_name", "deterioration_candidate_v2") if cand_bundle else "deterioration_candidate_v2",
             "version": "2.0.0-candidate",
             "target": self.deterioration_target,
-            "available": cand_exists,
-            "loaded": cand_bundle is not None,
-            "status": "AVAILABLE_FOR_EVALUATION" if cand_exists else "UNAVAILABLE",
+            "available": is_runtime_compatible,
+            "present_on_disk": cand_exists,
+            "loaded": is_runtime_compatible,
+            "runtime_compatible": is_runtime_compatible,
+            "status": cand_status_str,
+            "incompatibility_reason": self._candidate_load_error if not is_runtime_compatible and cand_exists else None,
             "promotion_status": "UNPROMOTED_CANDIDATE",
             "default_production_model": False,
             "supported_data_sources": ["historical_eicu"],
             "unsupported_data_sources": ["live_telemetry", "manual_entry", "bedside"],
-            "feature_count": cand_bundle.get("feature_count", 52) if cand_bundle else 52,
+            "feature_count": cand_bundle.get("feature_count", 52) if cand_bundle else (cand_metrics.get("feature_count", 52) if cand_metrics else 52),
             "feature_set_name": cand_bundle.get("feature_set_name", "Set_C_LaggedLabs") if cand_bundle else "Set_C_LaggedLabs",
             "calibration_method": cand_bundle.get("calibration_method", "platt_sigmoid_oof") if cand_bundle else "platt_sigmoid_oof",
             "decision_threshold": round(float(cand_bundle.get("decision_threshold", 0.0600)), 4) if cand_bundle else 0.0600,
-            "episode_policy": cand_bundle.get("episode_policy", {"cooldown_hours": 6, "reset_hours": 2}) if cand_bundle else None,
-            "git_commit_sha": cand_bundle.get("git_commit_sha") if cand_bundle else None,
+            "episode_policy": cand_bundle.get("episode_policy", {"cooldown_hours": 6, "reset_hours": 2}) if cand_bundle else {"cooldown_hours": 6, "reset_hours": 2},
+            "git_commit_sha": cand_bundle.get("git_commit_sha") if cand_bundle else (cand_metrics.get("git_commit_sha") if cand_metrics else None),
             "validation_metrics": cand_metrics.get("validation_metrics") if cand_metrics else None,
             "exploratory_test_benchmark": cand_metrics.get("exploratory_test_benchmark") if cand_metrics else None,
             "notes": (
                 "Pre-promotion candidate v2 evaluated on Set C (52 features with backward as-of lagged labs). "
                 "Restricted strictly to historical eICU inference; unsupported for live bedside telemetry or manual entry. "
                 "Baseline v1 remains the default production model."
+                if is_runtime_compatible
+                else f"Candidate v2 artifact requires scikit-learn 1.8.x and is incompatible with current runtime "
+                     f"(scikit-learn {sklearn.__version__}). Use the dedicated candidate evaluation environment "
+                     f"(ml/.venv_candidate) for candidate inference."
             ),
         }
+
 
         return {
             "status": overall_status,
@@ -505,15 +535,32 @@ class MLService:
 
         bundle = self._get_candidate_bundle()
         if bundle is None:
+            import sklearn
+            reason = (
+                self._candidate_load_error
+                or f"Candidate artifact was serialized under scikit-learn 1.8.0 and cannot be deserialized "
+                   f"under scikit-learn {sklearn.__version__}."
+            )
+            if allow_fallback:
+                fb_res = self.predict_deterioration(records)
+                if fb_res.get("available") and fb_res.get("status") == "SUCCESS":
+                    fb_res["fallback_applied"] = True
+                    fb_res["fallback_reason"] = (
+                        f"Candidate artifact '{CANDIDATE_ARTIFACT.name}' is incompatible with runtime "
+                        f"(scikit-learn {sklearn.__version__}). Fell back to production baseline v1."
+                    )
+                    fb_res["candidate_requested"] = True
+                    return fb_res
             return {
                 "available": False,
-                "status": "ERROR",
-                "error": "Failed to deserialize candidate model bundle.",
+                "status": "UNAVAILABLE_INCOMPATIBLE_RUNTIME",
+                "error": reason,
                 "probabilities": None,
                 "risk_bands": None,
                 "latest_prediction": None,
                 "fallback_applied": False,
             }
+
 
         try:
             if not isinstance(records, pd.DataFrame):

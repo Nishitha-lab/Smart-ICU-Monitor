@@ -20,8 +20,13 @@ From the repository root:
 ```powershell
 cd backend
 py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
+
+> [!IMPORTANT]
+> **Virtual Environment Alignment:**
+> The backend requires `scikit-learn==1.9.0` (pinned in `backend/requirements.txt`) to maintain binary serialization compatibility with baseline models. Always activate `.venv` or run via `.\.venv\Scripts\python.exe`. Do not use system Python. See [docs/MODEL_COMPATIBILITY.md](./docs/MODEL_COMPATIBILITY.md).
 
 Place the approved, locally prepared final-alert CSV at:
 
@@ -32,7 +37,8 @@ data\processed\smart_icu_final_alerts.csv
 Start the API from the `backend` directory:
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\Activate.ps1
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 The backend loads the CSV once at startup. Check
@@ -68,18 +74,39 @@ been verified.
 
 ## Checks
 
-Backend tests:
+Backend tests (225 tests):
 
 ```powershell
-cd backend
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+cd D:\Smart-ICU
+.\backend\.venv\Scripts\Activate.ps1
+pytest backend/tests -v -o pythonpath="backend ."
 ```
+
+Or directly via the dedicated virtual environment binary:
+
+```powershell
+& "D:\Smart-ICU\backend\.venv\Scripts\python.exe" -m pytest backend/tests -v -o pythonpath="backend ."
+```
+
+> [!CAUTION]
+> Do **NOT** execute tests using system Python. Always run within `.venv` where `scikit-learn==1.9.0` is pinned. Candidate v2 tests (`test_ml_candidate_inference.py`) require a 1.8.0 environment due to upstream loss module changes. See [docs/MODEL_COMPATIBILITY.md](./docs/MODEL_COMPATIBILITY.md).
+
+Candidate v2 evaluation tests (dedicated 1.8.0 environment):
+
+```powershell
+cd D:\Smart-ICU
+.\ml\.venv_candidate\Scripts\Activate.ps1
+pytest backend/tests/test_ml_candidate_inference.py -v -o pythonpath="backend ."
+```
+*(All 13 candidate inference tests pass with 100% success)*
+
 
 Experimental robustness tests:
 
 ```powershell
-cd ..
-.\backend\.venv\Scripts\python.exe -m unittest discover -s .\ml\experiments -p "test_*.py" -v
+cd D:\Smart-ICU
+.\backend\.venv\Scripts\Activate.ps1
+pytest ml/experiments -k "test_" -v
 ```
 
 Frontend:

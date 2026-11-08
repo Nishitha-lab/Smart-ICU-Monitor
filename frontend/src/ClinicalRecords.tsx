@@ -86,6 +86,12 @@ const OBSERVATION_UNITS: Record<string, string | null> = {
   "Respiratory rate": "breaths/min",
   "Systolic blood pressure": "mmHg",
   "Diastolic blood pressure": "mmHg",
+  "Heart rate": "bpm",
+  Pulse: "bpm",
+  "Oxygen saturation": "%",
+  SpO2: "%",
+  "IV fluid infusion": "mL",
+  "Intake volume": "mL",
   "Consciousness / general observation": null,
   "Clinical note": null,
 };
