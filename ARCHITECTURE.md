@@ -232,7 +232,11 @@ The Smart ICU platform incorporates a unified clinical alert and intelligence en
   - Invalid sensor states ($0\text{ BPM}$, $0\%\text{ SpO2}$) are quarantined and never generate false physiological alerts.
   - Unassigned device telemetry is never attached to patients.
 
-### ML Service Safety Constraints
-- Transparent inspection of `ml/models/` filesystem artifacts.
-- When `deterioration_logistic_v1.joblib` or `anomaly_isolation_forest_v2.joblib` are missing, the service strictly reports `UNAVAILABLE` and prevents synthetic probability fabrication.
-- Target definition for deterioration: `"ICU discharge marked expired within 24 hours"`.
+### ML Prediction Engine Architecture
+- **Retrospective Rolling 24-Hour Prediction:** At each observation timestamp $t$, uses features available at or before $t$ to estimate whether ICU discharge marked expired will occur within the next 24 hours. The 24-hour prediction horizon is strictly distinguished from the feature-observation period ($\le t$).
+- **Target Definition:** Strictly `"ICU discharge marked expired within the next 24 hours from the prediction timestamp"`.
+- **Model Architecture:** Unweighted Logistic Regression operating at natural training prevalence (~1.5-1.6%) alongside unsupervised IsolationForest v2.
+- **Safety Invariants:**
+  - Complete isolation between retrospective eICU research data and live ESP32 patient telemetry.
+  - Transparent status reporting: reports `UNAVAILABLE` without synthesizing artificial probabilities if model artifacts are missing.
+  - Risk bands (`Low`, `Moderate`, `High`, `Extreme`) are experimental presentation categories, not validated clinical severity classifications.

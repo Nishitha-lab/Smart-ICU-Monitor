@@ -426,7 +426,7 @@
 
 .diagnostic-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
   gap: 16px;
 }
 
@@ -610,4 +610,76 @@
   font-weight: 700;
   font-size: 13px;
   cursor: pointer;
+}
+
+/* Responsive Media Queries */
+@media (max-width: 768px) {
+  .alert-panel-header {
+    padding: 16px;
+  }
+
+  .alert-filter-bar {
+    padding: 14px;
+    gap: 12px;
+  }
+
+  .filter-group {
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
+
+  .filter-group select,
+  .filter-group input {
+    flex: 1;
+    max-width: 220px;
+  }
+
+  .filter-group.search-group input {
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .alert-panel-header h2 {
+    font-size: 18px;
+  }
+
+  .alert-panel-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .alert-summary-cards {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .alert-card-header,
+  .alert-card-body,
+  .alert-card-footer {
+    padding: 10px 14px;
+  }
+
+  .alert-diagnostic-panel {
+    padding: 14px 12px;
+  }
+
+  .diagnostic-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .alert-modal {
+    padding: 18px 14px;
+  }
+
+  .alert-action-buttons {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .filter-group select,
+  .filter-group input {
+    max-width: 100%;
+  }
 }

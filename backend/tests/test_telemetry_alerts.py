@@ -29,7 +29,7 @@ def test_telemetry_generates_critical_fluid_alert(store: PatientStore):
     store.assign_device("ESP32-FLUID", pat["id"], stay["id"])
 
     # Ingest reading with critical fluid <= 200 mL
-    now = "2026-11-08T11:00:00Z"
+    now = datetime.now(timezone.utc).isoformat()
     reading = store.ingest_reading("ESP32-FLUID", {
         "fluid_ml": 180.0,
         "bpm": 75.0,
@@ -56,7 +56,7 @@ def test_telemetry_generates_hypoxemia_alert(store: PatientStore):
     store.assign_device("ESP32-SPO2", pat["id"], stay["id"])
 
     # SpO2 = 86% -> CRITICAL alert
-    now = "2026-11-08T11:00:00Z"
+    now = datetime.now(timezone.utc).isoformat()
     store.ingest_reading("ESP32-SPO2", {
         "fluid_ml": 800.0,
         "bpm": 80.0,
@@ -77,7 +77,7 @@ def test_invalid_sensor_telemetry_does_not_generate_alert(store: PatientStore):
     store.assign_device("ESP32-INVALID", pat["id"], stay["id"])
 
     # Out of range BPM and SpO2 (e.g. sensor disconnected)
-    now = "2026-11-08T11:00:00Z"
+    now = datetime.now(timezone.utc).isoformat()
     reading = store.ingest_reading("ESP32-INVALID", {
         "fluid_ml": 800.0,
         "bpm": 0.0,      # Invalid BPM (< 40)
@@ -98,7 +98,7 @@ def test_unassigned_telemetry_does_not_attribute_or_alert(store: PatientStore):
     # Device exists but is NOT assigned to any patient/stay
     store.register_device(DeviceCreate(device_id="ESP32-UNASSIGNED", device_name="Unassigned", connection_type="serial"))
 
-    now = "2026-11-08T11:00:00Z"
+    now = datetime.now(timezone.utc).isoformat()
     reading = store.ingest_reading("ESP32-UNASSIGNED", {
         "fluid_ml": 100.0,  # Would be critical if assigned
         "bpm": 35.0,

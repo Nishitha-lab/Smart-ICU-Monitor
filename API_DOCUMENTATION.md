@@ -368,31 +368,62 @@ Retrieves alerts attributed to an ICU stay.
 
 ---
 
-## 7. Machine Learning Status API
+## 7. Machine Learning Intelligence APIs
 
 ### `GET /api/ml/status`
 Inspects the filesystem state of machine learning artifacts and reports deployment status safely without synthesizing probabilities or mock model files.
-- **Response:**
+- **Response (Online):**
   ```json
   {
-    "status": "UNAVAILABLE",
+    "status": "ONLINE",
     "deterioration_model": {
-      "artifact": "ml/models/deterioration_logistic_v1.joblib",
-      "target": "ICU discharge marked expired within 24 hours",
-      "status": "UNAVAILABLE",
-      "loaded": false,
-      "missing_path": "ml\\models\\deterioration_logistic_v1.joblib"
+      "artifact": "deterioration_logistic_v1.joblib",
+      "model_name": "deterioration_logistic_v1",
+      "model_type": "LogisticRegression (unweighted, natural prevalence)",
+      "version": "1.0.0",
+      "target": "ICU discharge marked expired within the next 24 hours from the prediction timestamp",
+      "target_definition": "ICU discharge marked expired within the next 24 hours from the prediction timestamp",
+      "available": true,
+      "loaded": true,
+      "status": "AVAILABLE",
+      "decision_threshold": 0.0823,
+      "validation_metrics": {
+        "roc_auc": 0.6875,
+        "pr_auc": 0.1257,
+        "brier_score": 0.0154,
+        "decision_threshold": 0.0823,
+        "precision": 0.1758,
+        "recall_sensitivity": 0.1709,
+        "specificity": 0.9864,
+        "f1_score": 0.1733
+      }
     },
     "anomaly_model": {
-      "artifact": "ml/models/anomaly_isolation_forest_v2.joblib",
-      "status": "UNAVAILABLE",
-      "loaded": false,
-      "missing_path": "ml\\models\\anomaly_isolation_forest_v2.joblib"
-    },
-    "diagnostic_notes": [
-      "Missing required artifact: ml\\models\\deterioration_logistic_v1.joblib",
-      "Missing required artifact: ml\\models\\anomaly_isolation_forest_v2.joblib",
-      "ML inference is offline. Deterministic clinical rules (KDIGO, Tietz, AHA) and hardware safeguards remain fully operational."
-    ]
+      "artifact": "anomaly_isolation_forest_v2.joblib",
+      "model_name": "anomaly_isolation_forest_v2",
+      "model_type": "IsolationForest",
+      "version": "2.0.0",
+      "available": true,
+      "status": "AVAILABLE"
+    }
   }
   ```
+
+### `GET /api/ml/predict/{stay_id}`
+Executes genuine retrospective rolling 24-hour machine learning prediction on an eICU patient stay.
+- **Target:** Strictly `"ICU discharge marked expired within the next 24 hours from the prediction timestamp"`.
+- **Response Structure:**
+  - `patientunitstayid`: ICU stay identifier.
+  - `model_name`: `"deterioration_logistic_v1"`.
+  - `target`: `"ICU discharge marked expired within the next 24 hours from the prediction timestamp"`.
+  - `latest_prediction`:
+    - `probability`: Float $[0.0, 1.0]$ representing unweighted Logistic Regression estimate.
+    - `risk_band`: Experimental presentation band (`"Low"`, `"Moderate"`, `"High"`, `"Extreme"`). Not a validated clinical severity classification.
+    - `decision_threshold`: Validation-tuned operating point (`0.0823`).
+    - `threshold_exceeded`: Boolean (`probability >= decision_threshold`).
+    - `model_intercept`: Intercept $\beta_0 = -4.3312$.
+    - `predicted_log_odds`: Linear predictor $z = \beta_0 + \sum \phi_j$.
+    - `top_contributing_features`: Array of top 6 features with observed value, weight, signed log-odds contribution, and direction.
+  - `anomaly`: Latest anomaly score and flag from IsolationForest v2.
+  - `series`: Chronological hourly predictions across the stay.
+  - `disclaimer`: Academic research prototype notice.

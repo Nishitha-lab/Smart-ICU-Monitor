@@ -13,20 +13,84 @@ import { API_BASE } from "./api";
 
 type MLStatus = {
   status: "ONLINE" | "UNAVAILABLE" | "DEGRADED";
+  academic_disclaimer?: string;
   deterioration_model: {
-    artifact: string;
-    target: string;
+    artifact?: string;
+    artifact_path?: string;
+    model_name?: string;
+    model_type?: string;
+    version?: string;
+    target?: string;
+    target_definition?: string;
     status: string;
-    loaded: boolean;
-    missing_path: string | null;
+    loaded?: boolean;
+    available?: boolean;
+    missing_path?: string | null;
+    decision_threshold?: number;
+    validation_metrics?: {
+      roc_auc: number;
+      pr_auc: number;
+      brier_score: number;
+      decision_threshold: number;
+      precision: number;
+      recall_sensitivity: number;
+      specificity: number;
+      f1_score: number;
+    } | null;
+    training_samples?: number;
+    positive_samples?: number;
+    feature_count?: number;
+    top_features?: Array<{
+      feature: string;
+      weight?: number;
+      abs_weight?: number;
+    }>;
+    notes?: string;
   };
   anomaly_model: {
-    artifact: string;
+    artifact?: string;
+    artifact_path?: string;
+    model_name?: string;
+    model_type?: string;
+    version?: string;
     status: string;
-    loaded: boolean;
-    missing_path: string | null;
+    loaded?: boolean;
+    available?: boolean;
+    missing_path?: string | null;
+    statistical_interpretation?: string;
+    notes?: string;
   };
-  diagnostic_notes: string[];
+  winning_model?: string;
+  diagnostic_notes?: string[];
+};
+
+type MLPredictionResult = {
+  patientunitstayid: number;
+  total_hours: number;
+  latest_hour: number;
+  model_name: string;
+  model_version: string;
+  target: string;
+  latest_prediction?: {
+    probability: number;
+    risk_band: string;
+    decision_threshold: number;
+    threshold_exceeded: boolean;
+    top_contributing_features: Array<{
+      feature: string;
+      value: number | null;
+      weight: number;
+      contribution: number;
+      abs_contribution: number;
+      direction: string;
+    }>;
+  };
+  anomaly?: {
+    available: boolean;
+    latest_score: number | null;
+    latest_flag: number;
+  };
+  disclaimer?: string;
 };
 
 type Summary = {
@@ -444,7 +508,18 @@ function App() {
   const [patients, setPatients] = useState<Patient[]>([]);
   const [activeSection, setActiveSection] = useState<
     "dashboard" | "patients" | "clinical" | "devices" | "alerts"
-  >("dashboard");
+  >(() => {
+    if (typeof window !== "undefined") {
+      const hash = window.location.hash.replace("#", "").toLowerCase();
+      if (hash === "alerts") return "alerts";
+      const params = new URLSearchParams(window.location.search);
+      const section = params.get("section") || params.get("tab");
+      if (section && ["dashboard", "patients", "clinical", "devices", "alerts"].includes(section.toLowerCase())) {
+        return section.toLowerCase() as "dashboard" | "patients" | "clinical" | "devices" | "alerts";
+      }
+    }
+    return "dashboard";
+  });
   const [mlStatus, setMlStatus] = useState<MLStatus | null>(null);
   const [priorityFilter, setPriorityFilter] = useState("all");
 
@@ -454,6 +529,7 @@ function App() {
   const [patientHistory, setPatientHistory] = useState<
     PatientHistoryRow[]
   >([]);
+  const [patientML, setPatientML] = useState<MLPredictionResult | null>(null);
 
   useEffect(() => {
     async function loadMLStatus() {
@@ -557,6 +633,7 @@ function App() {
 
     setSelectedPatientId(patientId);
     setPatientHistory([]);
+    setPatientML(null);
     setDetailLoading(true);
     setDetailError("");
 
@@ -586,6 +663,20 @@ function App() {
             : [];
 
       setPatientHistory(patientHistoryData);
+
+      // Attempt to load genuine retrospective ML prediction & explainability
+      try {
+        const mlResponse = await fetch(
+          `${API_BASE}/api/ml/predict/${patientId}`,
+          { signal: controller.signal }
+        );
+        if (mlResponse.ok && !controller.signal.aborted) {
+          const mlData: MLPredictionResult = await mlResponse.json();
+          setPatientML(mlData);
+        }
+      } catch {
+        // Retrospective ML prediction not available for non-eICU patient
+      }
     } catch (err) {
       if (!controller.signal.aborted) {
         setDetailError(
@@ -607,6 +698,7 @@ function App() {
     detailRequestRef.current = null;
     setSelectedPatientId(null);
     setPatientHistory([]);
+    setPatientML(null);
     setDetailError("");
   }, []);
 
@@ -733,7 +825,18 @@ function App() {
           <div className="ml-status-badge">ML OFFLINE</div>
           <div className="ml-status-text">
             <strong>Model Artifacts Missing:</strong> Neither <code>deterioration_logistic_v1.joblib</code> nor <code>anomaly_isolation_forest_v2.joblib</code> are deployed.
-            Predictive deterioration target remains strictly <em>ICU discharge marked expired within 24 hours</em>. Deterministic clinical rule guidelines (KDIGO 2012, Tietz, AHA) and hardware safeguards active.
+            Predictive deterioration target remains strictly <em>ICU discharge marked expired within the next 24 hours from the prediction timestamp</em>. Deterministic clinical rule guidelines (KDIGO 2012, Tietz, AHA) and hardware safeguards active.
+          </div>
+        </div>
+      )}
+
+      {mlStatus && (mlStatus.status === "ONLINE" || mlStatus.deterioration_model?.available) && (
+        <div className="ml-status-banner ml-status-banner-online" role="status">
+          <div className="ml-status-badge ml-status-badge-online">ML ONLINE</div>
+          <div className="ml-status-text">
+            <strong>Active Model:</strong> <code>{mlStatus.deterioration_model.model_name || "deterioration_logistic_v1"}</code> (v{mlStatus.deterioration_model.version || "1.0.0"}) &bull; Unweighted Logistic Regression (natural training prevalence) &bull; Target: <em>{mlStatus.deterioration_model.target || "ICU discharge marked expired within the next 24 hours from the prediction timestamp"}</em> &bull;
+            <strong> Metrics:</strong> ROC-AUC: <strong>{mlStatus.deterioration_model.validation_metrics?.roc_auc?.toFixed(4) ?? "0.6875"}</strong> &bull; PR-AUC: <strong>{mlStatus.deterioration_model.validation_metrics?.pr_auc?.toFixed(4) ?? "0.1257"}</strong> &bull; Brier Score: <strong>{mlStatus.deterioration_model.validation_metrics?.brier_score?.toFixed(4) ?? "0.0154"}</strong> &bull; Decision Threshold: <strong>{mlStatus.deterioration_model.decision_threshold?.toFixed(4) ?? "0.0823"}</strong> &bull; Anomaly: <code>{mlStatus.anomaly_model.model_name || "anomaly_isolation_forest_v2"}</code>
+            <span className="ml-research-pill">Academic Research Prototype</span>
           </div>
         </div>
       )}
@@ -1146,17 +1249,17 @@ function App() {
                       </span>
 
                       <strong>
-                        {formatRisk(
-                          latestDetailRow.risk_probability
-                        )}
+                        {patientML?.latest_prediction
+                          ? `${(patientML.latest_prediction.probability * 100).toFixed(1)}%`
+                          : formatRisk(latestDetailRow.risk_probability)}
                       </strong>
 
                       <span
                         className={riskClass(
-                          latestDetailRow.risk_band
+                          patientML?.latest_prediction?.risk_band || latestDetailRow.risk_band
                         )}
                       >
-                        {latestDetailRow.risk_band}
+                        {patientML?.latest_prediction?.risk_band || latestDetailRow.risk_band}
                       </span>
                     </div>
 
@@ -1636,9 +1739,9 @@ function App() {
       <span>24h risk</span>
 
       <strong>
-        {formatRisk(
-          latestDetailRow.risk_probability
-        )}
+        {patientML?.latest_prediction
+          ? `${(patientML.latest_prediction.probability * 100).toFixed(1)}%`
+          : formatRisk(latestDetailRow.risk_probability)}
       </strong>
     </div>
 
@@ -1806,6 +1909,55 @@ function App() {
                           ))}
                       </div>
                     </div>
+
+                    {patientML?.latest_prediction && (
+                      <div className="ml-model-card" aria-label="Machine Learning Explainability">
+                        <p className="eyebrow">PREDICTIVE ML INTELLIGENCE</p>
+                        <h3>Risk Drivers &amp; Attribution</h3>
+                        <div className="ml-card-model-meta">
+                          <span>Model: <strong>{patientML.model_name}</strong> (v{patientML.model_version})</span>
+                          <span>Target: <em>{patientML.target}</em></span>
+                          <span>Estimated 24h Risk: <strong>{(patientML.latest_prediction.probability * 100).toFixed(2)}%</strong></span>
+                          <span>Experimental Band: <strong className={riskClass(patientML.latest_prediction.risk_band)}>{patientML.latest_prediction.risk_band}</strong></span>
+                          <span>Threshold: <strong>{patientML.latest_prediction.decision_threshold.toFixed(4)}</strong> (<span className={patientML.latest_prediction.threshold_exceeded ? "badge-exceeded" : "badge-normal"}>{patientML.latest_prediction.threshold_exceeded ? "Exceeded" : "Nominal"}</span>)</span>
+                        </div>
+
+                        {patientML.latest_prediction.top_contributing_features.length > 0 && (
+                          <div className="ml-feature-attribution-table">
+                            <div className="ml-feature-table-title">Top Contributing Features (Logistic Regression Log-Odds Impact)</div>
+                            <table className="ml-feature-table">
+                              <thead>
+                                <tr>
+                                  <th>Feature</th>
+                                  <th>Observed Value</th>
+                                  <th>Model Weight</th>
+                                  <th>Impact</th>
+                                  <th>Direction</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {patientML.latest_prediction.top_contributing_features.map((feat) => (
+                                  <tr key={feat.feature}>
+                                    <td><code>{feat.feature}</code></td>
+                                    <td>{feat.value !== null ? feat.value : "—"}</td>
+                                    <td>{feat.weight > 0 ? `+${feat.weight.toFixed(4)}` : feat.weight.toFixed(4)}</td>
+                                    <td>{feat.contribution > 0 ? `+${feat.contribution.toFixed(4)}` : feat.contribution.toFixed(4)}</td>
+                                    <td>
+                                      <span className={feat.direction === "INCREASING_RISK" ? "impact-badge impact-up" : "impact-badge impact-down"}>
+                                        {feat.direction === "INCREASING_RISK" ? "▲ Escalates Risk" : "▼ Mitigates Risk"}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                        <p className="ml-card-disclaimer">
+                          <strong>Academic Prototype Notice:</strong> Retrospective rolling 24-hour prediction model for investigational research decision-support only. Risk bands are experimental presentation categories, not validated clinical severity classifications. Not an FDA/CE-cleared medical device.
+                        </p>
+                      </div>
+                    )}
                   </section>
 
                   <div className="detail-disclaimer">

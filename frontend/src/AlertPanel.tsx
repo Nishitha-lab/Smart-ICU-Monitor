@@ -2,13 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { API_BASE } from "./api";
 import "./AlertPanel.css";
 
-export type AlertSeverity = "CRITICAL" | "HIGH" | "MODERATE" | "LOW";
+export type AlertSeverity = "CRITICAL" | "HIGH" | "MODERATE" | "LOW" | "INFO";
 export type AlertStatus = "ACTIVE" | "ACKNOWLEDGED" | "RESOLVED" | "SUPERSEDED";
 export type AlertSource =
   | "ESP32_TELEMETRY"
   | "LAB_RESULT"
+  | "CLINICAL_OBSERVATION"
   | "URINE_OUTPUT"
-  | "NURSE_OBSERVATION";
+  | "NURSE_OBSERVATION"
+  | "HISTORICAL_EICU"
+  | "ML_ANOMALY"
+  | "ML_RISK"
+  | string;
 
 export type AlertItem = {
   alert_id: string;
@@ -27,17 +32,20 @@ export type AlertItem = {
   unit: string | null;
   reference_range: string | null;
   critical_threshold: string | null;
-  reference_source: string | null;
+  reference_source?: string | null;
+  rule_version?: string | null;
   explanation: string;
   status: AlertStatus;
   trigger_time: string;
   acknowledged_at: string | null;
   acknowledged_by: string | null;
+  acknowledgement_note?: string | null;
   resolved_at: string | null;
   resolved_by: string | null;
   resolution_note: string | null;
-  superseded_by_alert_id: string | null;
-  escalation_count: number;
+  superseded_by?: string | null;
+  superseded_by_alert_id?: string | null;
+  escalation_count?: number;
   created_at: string;
   updated_at: string;
 };
@@ -57,18 +65,30 @@ export type AlertSummary = {
   active: number;
   acknowledged: number;
   resolved: number;
-  superseded: number;
+  superseded?: number;
   critical: number;
   high: number;
-  moderate: number;
-  low: number;
+  moderate?: number;
+  low?: number;
+  active_alerts?: number;
+  critical_alerts?: number;
+  high_priority_alerts?: number;
+  unacknowledged_alerts?: number;
+  resolved_alerts?: number;
+  total_alerts?: number;
+  by_source?: Record<string, number>;
+  by_severity?: Record<string, number>;
 };
 
-const SOURCE_LABELS: Record<AlertSource, string> = {
+const SOURCE_LABELS: Record<string, string> = {
   ESP32_TELEMETRY: "ESP32 Sensor",
   LAB_RESULT: "Laboratory Result",
+  CLINICAL_OBSERVATION: "Clinical Observation",
   URINE_OUTPUT: "Urine Output (KDIGO)",
   NURSE_OBSERVATION: "Nurse Observation",
+  HISTORICAL_EICU: "Historical eICU",
+  ML_ANOMALY: "ML Anomaly",
+  ML_RISK: "ML Risk Model",
 };
 
 export default function AlertPanel() {
@@ -99,28 +119,37 @@ export default function AlertPanel() {
   const [actionError, setActionError] = useState<string | null>(null);
 
   const fetchAlerts = useCallback(async () => {
-    await Promise.resolve();
     try {
       setLoading(true);
       setError(null);
       const params = new URLSearchParams();
-      if (statusFilter !== "ALL") params.append("status", statusFilter);
+
+      // When statusFilter is default "ACTIVE", do not send status param so backend returns all active & in-progress alerts
+      if (statusFilter === "UNACKNOWLEDGED") {
+        params.append("status", "ACTIVE");
+      } else if (statusFilter === "ALL") {
+        params.append("status", "ALL");
+      } else if (statusFilter !== "ACTIVE") {
+        params.append("status", statusFilter);
+      }
+
       if (severityFilter !== "ALL") params.append("severity", severityFilter);
       if (sourceFilter !== "ALL") params.append("source", sourceFilter);
 
-      const [alertsRes, summaryRes] = await Promise.all([
-        fetch(`${API_BASE}/api/alerts?${params.toString()}`),
-        fetch(`${API_BASE}/api/alerts/summary`),
-      ]);
+      const qs = params.toString();
+      const url = `${API_BASE}/api/alerts${qs ? `?${qs}` : ""}`;
+      const alertsRes = await fetch(url);
 
       if (!alertsRes.ok) throw new Error("Failed to load clinical alerts.");
-      if (!summaryRes.ok) throw new Error("Failed to load alert summary.");
 
-      const alertsData: AlertItem[] = await alertsRes.json();
-      const summaryData: AlertSummary = await summaryRes.json();
+      const rawAlerts = await alertsRes.json();
+      const alertsData: AlertItem[] = Array.isArray(rawAlerts)
+        ? rawAlerts
+        : Array.isArray(rawAlerts?.alerts)
+        ? rawAlerts.alerts
+        : [];
 
       setAlerts(alertsData);
-      setSummary(summaryData);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error connecting to alert service");
     } finally {
@@ -128,21 +157,58 @@ export default function AlertPanel() {
     }
   }, [statusFilter, severityFilter, sourceFilter]);
 
+  const fetchSummary = useCallback(async () => {
+    try {
+      const summaryRes = await fetch(`${API_BASE}/api/alerts/summary`);
+      if (!summaryRes.ok) throw new Error("Failed to load alert summary.");
+
+      const rawSummary = await summaryRes.json();
+      const normalizedSummary: AlertSummary = {
+        total: rawSummary.total_alerts ?? rawSummary.total ?? 0,
+        active: rawSummary.active_alerts ?? rawSummary.active ?? 0,
+        acknowledged:
+          rawSummary.acknowledged ??
+          (rawSummary.total_alerts != null && rawSummary.unacknowledged_alerts != null
+            ? Math.max(0, rawSummary.total_alerts - rawSummary.unacknowledged_alerts)
+            : 0),
+        resolved: rawSummary.resolved_alerts ?? rawSummary.resolved ?? 0,
+        superseded: rawSummary.superseded ?? 0,
+        critical:
+          rawSummary.critical_alerts ??
+          rawSummary.critical ??
+          (rawSummary.by_severity?.critical ?? 0),
+        high:
+          rawSummary.high_priority_alerts ??
+          rawSummary.high ??
+          (rawSummary.by_severity?.high ?? 0),
+        moderate: rawSummary.moderate ?? (rawSummary.by_severity?.moderate ?? 0),
+        low: rawSummary.low ?? (rawSummary.by_severity?.low ?? 0),
+      };
+
+      setSummary(normalizedSummary);
+    } catch {
+      // Summary failure does not block alerts list
+    }
+  }, []);
+
+  // Fetch alerts and summary independently upon mount
   useEffect(() => {
     const timer = setTimeout(() => {
       void fetchAlerts();
+      void fetchSummary();
     }, 0);
     return () => clearTimeout(timer);
-  }, [fetchAlerts]);
+  }, [fetchAlerts, fetchSummary]);
 
-  // Auto-refresh timer
+  // Auto-refresh timer for continuous surveillance
   useEffect(() => {
     if (!autoRefresh) return;
     const interval = setInterval(() => {
-      fetchAlerts();
+      void fetchAlerts();
+      void fetchSummary();
     }, 10000);
     return () => clearInterval(interval);
-  }, [autoRefresh, fetchAlerts]);
+  }, [autoRefresh, fetchAlerts, fetchSummary]);
 
   const toggleExpand = async (alertId: string) => {
     if (expandedAlertId === alertId) {
@@ -155,7 +221,12 @@ export default function AlertPanel() {
         setAuditLoading(alertId);
         const res = await fetch(`${API_BASE}/api/alerts/${alertId}/history`);
         if (res.ok) {
-          const logs: AlertAuditLog[] = await res.json();
+          const rawHistory = await res.json();
+          const logs: AlertAuditLog[] = Array.isArray(rawHistory)
+            ? rawHistory
+            : Array.isArray(rawHistory?.history)
+            ? rawHistory.history
+            : [];
           setAuditLogs((prev) => ({ ...prev, [alertId]: logs }));
         }
       } catch {
@@ -220,7 +291,7 @@ export default function AlertPanel() {
       }
 
       handleCloseAction();
-      await fetchAlerts();
+      await Promise.all([fetchAlerts(), fetchSummary()]);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Action failed");
     } finally {
@@ -289,7 +360,14 @@ export default function AlertPanel() {
             />
             Auto-refresh (10s)
           </label>
-          <button className="refresh-btn" onClick={fetchAlerts} disabled={loading}>
+          <button
+            className="refresh-btn"
+            onClick={() => {
+              void fetchAlerts();
+              void fetchSummary();
+            }}
+            disabled={loading}
+          >
             {loading ? "Refreshing..." : "↻ Refresh Alerts"}
           </button>
         </div>
@@ -329,11 +407,12 @@ export default function AlertPanel() {
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
           >
-            <option value="ALL">All Statuses</option>
             <option value="ACTIVE">Active</option>
-            <option value="ACKNOWLEDGED">Acknowledged</option>
+            <option value="UNACKNOWLEDGED">Unacknowledged Only</option>
+            <option value="ACKNOWLEDGED">Acknowledged Only</option>
             <option value="RESOLVED">Resolved</option>
             <option value="SUPERSEDED">Superseded</option>
+            <option value="ALL">All Statuses</option>
           </select>
         </div>
 
@@ -362,6 +441,7 @@ export default function AlertPanel() {
             <option value="ALL">All Sources</option>
             <option value="ESP32_TELEMETRY">ESP32 Sensor Telemetry</option>
             <option value="LAB_RESULT">Laboratory Result</option>
+            <option value="CLINICAL_OBSERVATION">Clinical Observation</option>
             <option value="URINE_OUTPUT">Urine Output (KDIGO)</option>
             <option value="NURSE_OBSERVATION">Nurse Observation</option>
           </select>
@@ -392,15 +472,34 @@ export default function AlertPanel() {
         </div>
       </div>
 
-      {error && <div className="alert-error-banner">{error}</div>}
+      {error && <div className="alert-error-banner" role="alert">{error}</div>}
 
       {/* Alert List */}
       <div className="alert-list-container">
         {loading && alerts.length === 0 && (
-          <div className="alert-empty-state">Loading active alerts...</div>
+          <div className="alert-empty-state alert-loading-state" role="status">
+            Loading active alerts...
+          </div>
         )}
 
-        {!loading && filteredAlerts.length === 0 && (
+        {error && alerts.length === 0 && (
+          <div className="alert-empty-state alert-error-state" role="alert">
+            <p><strong>Failed to load clinical alerts</strong></p>
+            <span className="empty-subtitle">{error}</span>
+            <button
+              className="refresh-btn"
+              onClick={() => {
+                void fetchAlerts();
+                void fetchSummary();
+              }}
+              style={{ marginTop: "12px" }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {!loading && !error && filteredAlerts.length === 0 && (
           <div className="alert-empty-state">
             <p>No alerts match the selected criteria.</p>
             <span className="empty-subtitle">ICU patient vitals and telemetry currently in safe physiological bands.</span>
@@ -430,9 +529,9 @@ export default function AlertPanel() {
                       <span className="badge-source">
                         {SOURCE_LABELS[alert.source] || alert.source}
                       </span>
-                      {alert.escalation_count > 0 && (
+                      {(alert.escalation_count ?? 0) > 0 && (
                         <span className="badge-escalated">
-                          Escalated x{alert.escalation_count}
+                          Escalated x{alert.escalation_count ?? 0}
                         </span>
                       )}
                     </div>
@@ -505,7 +604,7 @@ export default function AlertPanel() {
                         <div className="diagnostic-item">
                           <span className="diagnostic-q">1. What triggered this alert?</span>
                           <span className="diagnostic-a">
-                            <strong>{alert.measurement_name}</strong> under category <em>{alert.category}</em> from <strong>{SOURCE_LABELS[alert.source]}</strong> at {alert.trigger_time}.
+                            <strong>{alert.measurement_name}</strong> under category <em>{alert.category}</em> from <strong>{SOURCE_LABELS[alert.source] || alert.source}</strong> at {alert.trigger_time}.
                           </span>
                         </div>
 
@@ -541,8 +640,8 @@ export default function AlertPanel() {
                         <div className="diagnostic-item">
                           <span className="diagnostic-q">6. Is this reading confirmed, escalating, or superseded?</span>
                           <span className="diagnostic-a">
-                            Current Status: <strong>{alert.status}</strong>. Escalation count: <strong>{alert.escalation_count}</strong>.
-                            {alert.superseded_by_alert_id && ` Superseded by Alert ${alert.superseded_by_alert_id}.`}
+                            Current Status: <strong>{alert.status}</strong>. Escalation count: <strong>{alert.escalation_count ?? 0}</strong>.
+                            {(alert.superseded_by || alert.superseded_by_alert_id) && ` Superseded by Alert ${alert.superseded_by || alert.superseded_by_alert_id}.`}
                             {alert.resolution_note && ` Resolution Note: ${alert.resolution_note}`}
                           </span>
                         </div>

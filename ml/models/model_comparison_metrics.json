@@ -1,0 +1,236 @@
+{
+  "training_timestamp": "2026-11-08T11:07:02.558235+00:00",
+  "target": "ICU discharge marked expired within 24 hours",
+  "winning_model": "RandomForest",
+  "features": [
+    "heart_rate",
+    "spo2",
+    "respiration",
+    "systolic_bp",
+    "diastolic_bp",
+    "mean_bp",
+    "heart_rate_change_1h",
+    "spo2_change_1h",
+    "respiration_change_1h",
+    "systolic_bp_change_1h",
+    "diastolic_bp_change_1h",
+    "mean_bp_change_1h",
+    "heart_rate_rolling_mean_3h",
+    "spo2_rolling_mean_3h",
+    "respiration_rolling_mean_3h",
+    "mean_bp_rolling_mean_3h",
+    "net_fluid_balance_ml",
+    "urine_output_ml",
+    "active_infusion_count",
+    "vasoactive_support",
+    "clinical_warning_count",
+    "clinical_severe_count"
+  ],
+  "dataset": {
+    "train_patients": 1271,
+    "train_rows": 96731,
+    "train_positive": 1461,
+    "val_patients": 272,
+    "val_rows": 21255,
+    "val_positive": 341,
+    "test_patients": 273,
+    "test_rows": 21446,
+    "test_positive": 357
+  },
+  "models": {
+    "LogisticRegression": {
+      "model_name": "LogisticRegression",
+      "roc_auc": 0.6875,
+      "pr_auc": 0.1257,
+      "brier_score": 0.0154,
+      "decision_threshold": 0.0823,
+      "precision": 0.1758,
+      "recall_sensitivity": 0.1709,
+      "specificity": 0.9864,
+      "f1_score": 0.1733,
+      "confusion_matrix": [
+        [
+          20803,
+          286
+        ],
+        [
+          296,
+          61
+        ]
+      ],
+      "true_positives": 61,
+      "false_positives": 286,
+      "true_negatives": 20803,
+      "false_negatives": 296
+    },
+    "LogisticRegression_Balanced": {
+      "model_name": "LogisticRegression_Balanced",
+      "roc_auc": 0.6742,
+      "pr_auc": 0.1273,
+      "brier_score": 0.1764,
+      "decision_threshold": 0.8402,
+      "precision": 0.1786,
+      "recall_sensitivity": 0.1821,
+      "specificity": 0.9858,
+      "f1_score": 0.1803,
+      "confusion_matrix": [
+        [
+          20790,
+          299
+        ],
+        [
+          292,
+          65
+        ]
+      ],
+      "true_positives": 65,
+      "false_positives": 299,
+      "true_negatives": 20790,
+      "false_negatives": 292
+    },
+    "RandomForest": {
+      "model_name": "RandomForest",
+      "roc_auc": 0.7252,
+      "pr_auc": 0.1315,
+      "brier_score": 0.0154,
+      "decision_threshold": 0.0726,
+      "precision": 0.1786,
+      "recall_sensitivity": 0.1821,
+      "specificity": 0.9858,
+      "f1_score": 0.1803,
+      "confusion_matrix": [
+        [
+          20790,
+          299
+        ],
+        [
+          292,
+          65
+        ]
+      ],
+      "true_positives": 65,
+      "false_positives": 299,
+      "true_negatives": 20790,
+      "false_negatives": 292
+    },
+    "GradientBoosting": {
+      "model_name": "GradientBoosting",
+      "roc_auc": 0.7084,
+      "pr_auc": 0.1167,
+      "brier_score": 0.0159,
+      "decision_threshold": 0.0912,
+      "precision": 0.2269,
+      "recall_sensitivity": 0.1373,
+      "specificity": 0.9921,
+      "f1_score": 0.171,
+      "confusion_matrix": [
+        [
+          20922,
+          167
+        ],
+        [
+          308,
+          49
+        ]
+      ],
+      "true_positives": 49,
+      "false_positives": 167,
+      "true_negatives": 20922,
+      "false_negatives": 308
+    }
+  },
+  "top_features_logistic": [
+    {
+      "feature": "urine_output_ml",
+      "weight": -0.3853,
+      "abs_weight": 0.3853
+    },
+    {
+      "feature": "mean_bp_rolling_mean_3h",
+      "weight": -0.2987,
+      "abs_weight": 0.2987
+    },
+    {
+      "feature": "systolic_bp",
+      "weight": -0.261,
+      "abs_weight": 0.261
+    },
+    {
+      "feature": "clinical_warning_count",
+      "weight": 0.2563,
+      "abs_weight": 0.2563
+    },
+    {
+      "feature": "clinical_severe_count",
+      "weight": 0.256,
+      "abs_weight": 0.256
+    },
+    {
+      "feature": "heart_rate",
+      "weight": 0.1335,
+      "abs_weight": 0.1335
+    },
+    {
+      "feature": "systolic_bp_change_1h",
+      "weight": 0.1278,
+      "abs_weight": 0.1278
+    },
+    {
+      "feature": "heart_rate_rolling_mean_3h",
+      "weight": 0.1265,
+      "abs_weight": 0.1265
+    },
+    {
+      "feature": "respiration_rolling_mean_3h",
+      "weight": 0.125,
+      "abs_weight": 0.125
+    },
+    {
+      "feature": "vasoactive_support",
+      "weight": 0.1249,
+      "abs_weight": 0.1249
+    }
+  ],
+  "top_features_random_forest": [
+    {
+      "feature": "spo2_rolling_mean_3h",
+      "importance": 0.1177
+    },
+    {
+      "feature": "spo2",
+      "importance": 0.0983
+    },
+    {
+      "feature": "mean_bp_rolling_mean_3h",
+      "importance": 0.0878
+    },
+    {
+      "feature": "systolic_bp",
+      "importance": 0.0845
+    },
+    {
+      "feature": "heart_rate_rolling_mean_3h",
+      "importance": 0.0672
+    },
+    {
+      "feature": "heart_rate",
+      "importance": 0.0629
+    },
+    {
+      "feature": "clinical_severe_count",
+      "importance": 0.0535
+    },
+    {
+      "feature": "clinical_warning_count",
+      "importance": 0.0518
+    },
+    {
+      "feature": "respiration_rolling_mean_3h",
+      "importance": 0.0491
+    },
+    {
+      "feature": "respiration",
+      "importance": 0.044
+    }
+  ]
+}

@@ -1,8 +1,14 @@
 """Tests for ML safety guarantees, missing artifact detection, and no fabricated predictions."""
 
+from __future__ import annotations
+
 import asyncio
 import json
+from pathlib import Path
+from unittest.mock import patch
+
 import main
+import pandas as pd
 from services.ml_service import ml_service
 
 
@@ -60,36 +66,77 @@ def request_app(
     return asyncio.run(call_app())
 
 
-def test_ml_status_reports_unavailable_accurately():
+def test_ml_status_reports_online_when_artifacts_present():
+    """Verify that when real model artifacts exist, status reports ONLINE with genuine metrics."""
     status, data = request_app("/api/ml/status")
     assert status == 200
+    assert data["status"] == "ONLINE"
 
     det = data["deterioration_model"]
-    assert det["available"] is False
-    assert det["status"] == "UNAVAILABLE"
-    assert det["target_definition"] == "ICU discharge marked expired within 24 hours"
-    assert "not found" in det["notes"].lower()
+    assert det["available"] is True
+    assert det["status"] == "AVAILABLE"
+    assert det["target_definition"] == "ICU discharge marked expired within the next 24 hours from the prediction timestamp"
+    assert det["version"] == "1.0.0"
+
+    metrics = det["validation_metrics"]
+    assert metrics is not None
+    assert metrics["roc_auc"] == 0.6875
+    assert metrics["brier_score"] == 0.0154
+    assert metrics["decision_threshold"] == 0.0823
 
     anom = data["anomaly_model"]
-    assert anom["available"] is False
-    assert anom["status"] == "UNAVAILABLE"
+    assert anom["available"] is True
+    assert anom["status"] == "AVAILABLE"
     assert "Statistical multi-variable outlier detection" in anom["statistical_interpretation"]
 
     rules = data["clinical_rules_status"]
     assert rules["status"] == "ACTIVE"
 
 
-def test_predict_deterioration_returns_unavailable_without_fabrication():
-    res = ml_service.predict_deterioration(None)
+def test_ml_status_reports_unavailable_when_artifacts_missing():
+    """Verify that if artifacts are missing, status strictly reports UNAVAILABLE without guessing."""
+    with patch("services.ml_service.DETERIORATION_ARTIFACT", Path("non_existent_det.joblib")), \
+         patch("services.ml_service.ANOMALY_ARTIFACT", Path("non_existent_anom.joblib")):
+        status, data = request_app("/api/ml/status")
+        assert status == 200
+        assert data["status"] == "UNAVAILABLE"
+
+        det = data["deterioration_model"]
+        assert det["available"] is False
+        assert det["status"] == "UNAVAILABLE"
+        assert det["target_definition"] == "ICU discharge marked expired within the next 24 hours from the prediction timestamp"
+        assert "not found" in det["notes"].lower()
+
+        anom = data["anomaly_model"]
+        assert anom["available"] is False
+        assert anom["status"] == "UNAVAILABLE"
+
+
+def test_predict_deterioration_returns_unavailable_when_artifact_missing():
+    """Verify predict_deterioration returns UNAVAILABLE without fabricating probabilities."""
+    with patch("services.ml_service.DETERIORATION_ARTIFACT", Path("non_existent_det.joblib")):
+        res = ml_service.predict_deterioration(pd.DataFrame([{"heart_rate": 80}]))
+        assert res["available"] is False
+        assert res["status"] == "UNAVAILABLE"
+        assert res["probabilities"] is None
+        assert res["target"] == "ICU discharge marked expired within the next 24 hours from the prediction timestamp"
+
+
+def test_score_anomalies_returns_unavailable_when_artifact_missing():
+    """Verify score_anomalies returns UNAVAILABLE without fabricating anomaly scores."""
+    with patch("services.ml_service.ANOMALY_ARTIFACT", Path("non_existent_anom.joblib")):
+        res = ml_service.score_anomalies(pd.DataFrame([{"heart_rate": 80}]))
+        assert res["available"] is False
+        assert res["status"] == "UNAVAILABLE"
+        assert res["scores"] is None
+        assert res["flags"] is None
+
+
+def test_predict_deterioration_rejects_incompatible_features():
+    """Verify feature validation: missing required features cannot produce fake predictions."""
+    incomplete_data = pd.DataFrame([{"heart_rate": 80, "spo2": 98}])
+    res = ml_service.predict_deterioration(incomplete_data)
     assert res["available"] is False
-    assert res["status"] == "UNAVAILABLE"
+    assert res["status"] == "INCOMPATIBLE_FEATURES"
     assert res["probabilities"] is None
-    assert res["target"] == "ICU discharge marked expired within 24 hours"
-
-
-def test_score_anomalies_returns_unavailable_without_fabrication():
-    res = ml_service.score_anomalies(None)
-    assert res["available"] is False
-    assert res["status"] == "UNAVAILABLE"
-    assert res["scores"] is None
-    assert res["flags"] is None
+    assert "Missing required features" in res["error"]

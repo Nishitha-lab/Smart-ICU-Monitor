@@ -248,11 +248,27 @@ The platform integrates a continuous clinical interpretation and deterministic a
   - **Heart Rate:** $< 40$ or $> 140\text{ BPM}$ (Critical), $< 50$ or $> 120\text{ BPM}$ (Moderate).
 - **Sensor Quality Masking:** Hardware disconnections ($0\text{ BPM}$ or $0\%\text{ SpO2}$) are masked to `None` and do NOT trigger false physiological bradycardia or hypoxemia alerts. Unassigned telemetry is never attributed to patients.
 
-### Machine Learning Engine Safety Status
-- The expected model artifacts `ml/models/deterioration_logistic_v1.joblib` and `ml/models/anomaly_isolation_forest_v2.joblib` are **not present in the repository**.
-- In strict adherence to clinical safety principles, the system **does not synthesize mock weights or fabricate artificial probabilities**.
-- The ML Service transparently reports `status: "UNAVAILABLE"` with diagnostic notes, and the UI displays an informational status banner noting deterministic clinical rules and hardware buzzer safeguards are active.
-- Ground truth target for deterioration models remains strictly: `"ICU discharge marked expired within 24 hours"`.
+### Machine Learning Prediction Engine (Retrospective Research Prototype)
+- Trained models are serialized and deployed in `ml/models/` (`deterioration_logistic_v1.joblib` and `anomaly_isolation_forest_v2.joblib`).
+- **Prediction Design:** Retrospective rolling 24-hour prediction model. At each observation timestamp $t$, it uses features available at or before $t$ to estimate whether ICU discharge marked expired will occur within the next 24 hours. The 24-hour prediction horizon is strictly distinguished from the feature-observation period (accumulated history $\le t$).
+- **Target Definition:** Strictly `"ICU discharge marked expired within the next 24 hours from the prediction timestamp"` (derived from eICU `unitdischargestatus == "Expired"` and `0 <= hours_to_discharge <= 24`). General in-hospital mortality is not assumed.
+- **Model Architecture & Calibration:** Unweighted Logistic Regression operating at natural training prevalence (~1.5-1.6%).
+  - Test Calibration Intercept: `-0.4605` (ideal 0.0), Calibration Slope: `0.8360` (ideal 1.0).
+  - Test Model Brier Score: `0.015443` vs Prevalence-Only Baseline Brier Score: `0.016369`. The low Brier score is driven by the 98.34% negative class prevalence and does not alone prove good calibration.
+  - Test Discrimination: ROC-AUC: `0.6875` (95% Clustered CI: `[0.5699, 0.8021]`), PR-AUC: `0.1257` (95% Clustered CI: `[0.0531, 0.2258]`).
+  - Validation-Tuned Operating Threshold: $\theta^* = 0.0823$.
+  - Hourly Observations Confusion Matrix: $\text{TN}=20,803, \text{FP}=286, \text{FN}=296, \text{TP}=61$ (Specificity: $98.64\%$, Recall: $17.09\%$, Precision: $17.58\%$).
+- **False-Positive Clarification:** The 286 false-positive hourly observations occur across 69 unique ICU stays, representing mathematical threshold crossings on isolated hourly rows, not 286 independent clinical alarms or pager alerts.
+- **Patient/Stay-Level Event Detection:**
+  - Unique positive ICU stays in test set: **18**
+  - Unique positive ICU stays flagged at least once within 24 hours prior to ICU discharge marked expired: **13**
+  - Patient/stay-level sensitivity: **72.22%** (13 / 18)
+  - Detection lead-time distribution: Median **9.00 hours**, Mean **10.15 hours** (min 0.0h, max 23.0h, IQR: 2.0h - 19.0h) before final observation.
+  - Positive ICU stays never flagged: **5** (Stays: 176730, 827085, 1073098, 1109136, 2901384).
+- **Experimental Risk Bands:** Low ($p < 0.05$), Moderate ($0.05 \le p < 0.15$), High ($0.15 \le p < 0.30$), Extreme ($p \ge 0.30$). These are presentation categories, not validated clinical severity classifications.
+- **Explainability:** Exact signed log-odds attribution ($\text{logit}(p) = \beta_0 + \sum \phi_j$) exposing `model_intercept` and `predicted_log_odds` down to the API.
+- **Model Artifact Provenance & Manifest:** The five current model artifacts were hashed and their file sizes and SHA-256 checksums recorded. These values match the current release manifest. Historical identity with an earlier trained baseline could not be independently established because the artifacts are not present in the available Git history.
+- **Offline Isolation:** Historical eICU models do not ingest live serial telemetry, preserving deterministic clinical rule safety.
 
 ---
 
@@ -313,32 +329,33 @@ The platform integrates a continuous clinical interpretation and deterministic a
 
 The codebase includes comprehensive unit, integration, attribution safety, lifecycle, and UI component tests:
 
-### Run Backend Tests (139 tests)
+### Run Backend Tests (154 tests)
 ```powershell
 $env:PYTHONPATH="backend"
-& "backend/.venv/Scripts/pytest.exe" backend/tests
+& "backend/.venv/Scripts/pytest.exe" backend/tests -v
 ```
-- **139 automated tests** covering:
+- **154 automated tests** covering:
   - `test_clinical_alert_engine.py`: KDIGO urine output, canonical lab registry, vitals rules, custom reference range parsing, duration parsing.
   - `test_alert_manager.py`: Alert lifecycle, deduplication fingerprinting, escalation, auto-resolution on normal reading, manual acknowledge/resolve, record revision/voiding synchronization.
+  - `test_ml_engine.py`: Serialized model inference, probability bounds, mathematical log-odds attribution, anomaly scoring, REST prediction endpoint.
   - `test_ml_safety.py`: ML status reporting, missing artifact diagnostics, deterrence of synthetic score fabrication.
   - `test_telemetry_alerts.py`: Bedside IV fluid and vital alerts, quality masking, patient attribution isolation.
   - `test_alert_api.py`: REST API integration for alerts, summary, triage, and record evaluation.
-  - Plus all 86 original regression tests for patient lifecycle, admissions, device assignment, and concurrency.
+  - Plus all regression tests for patient lifecycle, admissions, device assignment, concurrency, and stress bursts.
 
-### Run Frontend Tests & Checks (39 tests)
+### Run Frontend Tests & Checks (46 tests)
 ```powershell
 cd D:\Smart-ICU\frontend
 npm test -- --run
 npm run build
 ```
-- **39 automated tests** covering:
+- **46 automated tests** covering:
   - `AlertPanel.test.tsx`: Stat cards, status/severity/source filtering, 7-question diagnostic inspection, clinician acknowledgment, clinician resolution.
   - `ClinicalInterpretation.test.tsx`: Live interpretation preview while typing, evaluated interpretation banner with evidence upon submission.
   - `ClinicalRecords.test.tsx`: Manual record entry, unit normalization, optimistic concurrency locking, voiding.
-  - `App.test.tsx`: Command center, eICU triage, hardware telemetry banner, ML status banner.
+  - `App.test.tsx`: Command center, eICU triage, hardware telemetry banner, ML status banner, patient ML explainability card.
   - `PatientManagement.test.tsx` & `DeviceManagement.test.tsx`: Lifecycle and assignment operations.
-- **TypeScript & Vite Build:** 100% clean production bundle (`tsc -b && vite build` in ~160ms).
+- **TypeScript & Vite Build:** 100% clean production bundle (`tsc -b && vite build` in ~180ms).
 
 ---
 
@@ -348,3 +365,4 @@ npm run build
 2. **Clinical Reference Ranges:** Displayed flags and validation bounds are technical sanity checks, not diagnostic algorithms.
 3. **No Automatic Clinical Diagnosis:** The platform does not prescribe medication, calculate dynamic drug dosages, or diagnose disease.
 4. **Hardware Identity:** ESP32 firmware lacks cryptographically signed hardware identity; the system uses backend-managed device identifiers.
+5. **Model Artifact Provenance:** The five current model artifacts were hashed and their file sizes and SHA-256 checksums recorded. These values match the current release manifest. Historical identity with an earlier trained baseline could not be independently established because the artifacts are not present in the available Git history.

@@ -151,7 +151,7 @@ This script provides a structured demonstration of the Smart ICU system, highlig
    KDIGO 2012 criteria evaluate urine output with duration parsing and weight adjustment. The canonical lab registry evaluates electrolytes, renal, hematology, and metabolic panels against validated medical guidelines.
 3. **Alert Deduplication, Escalation & Auto-Resolution:**
    Fingerprinting deduplicates active alerts, deterioration escalates severity, subsequent normal readings auto-resolve active alerts, and record revisions supersede obsolete alerts.
-4. **Transparent ML Safety Posture:**
-   When machine learning model files are absent, the system accurately reports `UNAVAILABLE` without synthesizing artificial scores. Ground truth deterioration targets strictly remain `"ICU discharge marked expired within 24 hours"`.
+4. **Transparent ML Prediction Posture:**
+   Trained models operate as a retrospective rolling 24-hour prediction engine using unweighted Logistic Regression at natural training prevalence, targeting `"ICU discharge marked expired within the next 24 hours from the prediction timestamp"`. When model files are absent, the system strictly reports `UNAVAILABLE` without synthesizing artificial scores. Risk bands are experimental presentation categories.
 5. **Audit Trail Compliance & Comprehensive Testing:**
-   Complete audit logs for every alert transition. 139 backend tests (pytest) and 39 frontend tests (vitest) pass with 100% success.
+   Complete audit logs for every alert transition. 154 backend tests (pytest) and 46 frontend tests (vitest) pass with 100% success.

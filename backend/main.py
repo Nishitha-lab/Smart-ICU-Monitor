@@ -1707,3 +1707,60 @@ def preview_clinical_evaluation(req: EvaluateRequest):
 @app.get("/api/ml/status")
 def get_ml_status():
     return ml_service.get_status()
+
+
+@app.get("/api/ml/predict/{stay_id}")
+def predict_patient_ml(stay_id: int):
+    """
+    Run genuine retrospective rolling machine learning inference on an ICU stay.
+    Evaluates unweighted Logistic Regression deterioration risk (target: ICU discharge marked expired within the next 24 hours from the prediction timestamp)
+    and unsupervised IsolationForest anomaly detection.
+    """
+    patient_df = require_patient(stay_id)
+    sorted_df = patient_df.sort_values("hour").reset_index(drop=True)
+
+    det_result = ml_service.predict_deterioration(sorted_df)
+    anom_result = ml_service.score_anomalies(sorted_df)
+
+    if not det_result.get("available"):
+        raise HTTPException(
+            status_code=503 if det_result.get("status") == "UNAVAILABLE" else 422,
+            detail=det_result.get("error", "ML prediction unavailable.")
+        )
+
+    latest_row = sorted_df.iloc[-1]
+    latest_hour = int(latest_row["hour"])
+    latest_pred = det_result.get("latest_prediction") or {}
+
+    # Construct historical series for charts/timelines
+    series = []
+    probs = det_result.get("probabilities") or []
+    bands = det_result.get("risk_bands") or []
+    anom_scores = anom_result.get("scores") or [] if anom_result.get("available") else []
+    anom_flags = anom_result.get("flags") or [] if anom_result.get("available") else []
+
+    for i, row in sorted_df.iterrows():
+        series.append({
+            "hour": int(row["hour"]),
+            "probability": probs[i] if i < len(probs) else None,
+            "risk_band": bands[i] if i < len(bands) else "Unknown",
+            "anomaly_score": anom_scores[i] if i < len(anom_scores) else None,
+            "anomaly_flag": anom_flags[i] if i < len(anom_flags) else 0,
+        })
+
+    return {
+        "patientunitstayid": stay_id,
+        "total_hours": len(sorted_df),
+        "latest_hour": latest_hour,
+        "model_name": det_result.get("model_name"),
+        "model_version": det_result.get("model_version"),
+        "target": det_result.get("target"),
+        "latest_prediction": latest_pred,
+        "anomaly": {
+            "available": anom_result.get("available", False),
+            "latest_score": anom_scores[-1] if anom_scores else None,
+            "latest_flag": anom_flags[-1] if anom_flags else 0,
+        },
+        "series": series,
+        "disclaimer": det_result.get("disclaimer"),
+    }
