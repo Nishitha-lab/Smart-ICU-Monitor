@@ -102,6 +102,10 @@ def test_urine_output_polyuria():
     assert interp.status == "HIGH"
     assert interp.requires_alert is True
     assert "POLYURIA" in interp.explanation
+    assert interp.reference_source == "General ICU Monitoring Heuristic (Unverified Provenance)"
+    assert "not a KDIGO AKI staging criterion" in interp.explanation
+    assert "KDIGO Clinical Practice Guideline" not in interp.reference_source
+
 
 
 def test_urine_output_missing_weight():

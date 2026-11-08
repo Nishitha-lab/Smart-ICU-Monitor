@@ -1092,8 +1092,12 @@ def inject_device_telemetry(device_id: str, reading: TelemetryIngest):
     Ingest or simulate incoming telemetry for a device.
     Associates reading with patient and stay strictly based on active backend assignment.
     """
-    reading_dict = reading.model_dump()
-    return patient_store.ingest_reading(device_id, reading_dict)
+    try:
+        reading_dict = reading.model_dump()
+        return patient_store.ingest_reading(device_id, reading_dict)
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail=str(err))
+
 
 
 @app.get("/api/patients/{patient_ref}/timeline")

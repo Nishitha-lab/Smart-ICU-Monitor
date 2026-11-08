@@ -17,7 +17,7 @@ def _utc_iso(value: datetime | str | None) -> str:
     if isinstance(value, str):
         value = value.strip()
         if not value:
-            return datetime.now(timezone.utc).isoformat()
+            raise ValueError("Timestamp string cannot be empty; use None to default to current time.")
         try:
             parsed = datetime.fromisoformat(value)
         except ValueError as err:
@@ -25,9 +25,12 @@ def _utc_iso(value: datetime | str | None) -> str:
         if parsed.utcoffset() is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc).isoformat()
-    if value.utcoffset() is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat()
+    if isinstance(value, datetime):
+        if value.utcoffset() is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    raise ValueError(f"Invalid timestamp type '{type(value).__name__}': expected string, datetime, or None.")
+
 
 
 # ============================================================
@@ -227,6 +230,25 @@ class TelemetryIngest(BaseModel):
     connection_status: Annotated[str, Field(max_length=40)] = "CONNECTED"
     reading_time: datetime | str | None = None
     validity: dict[str, bool] | None = None
+
+    @field_validator("reading_time", mode="before")
+    @classmethod
+    def validate_reading_time(cls, value: Any) -> str | datetime | None:
+        if value is None:
+            return None
+        if not isinstance(value, (str, datetime)):
+            raise ValueError(f"reading_time must be an ISO-8601 string, datetime, or null, got {type(value).__name__}.")
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError("reading_time cannot be an empty string; use null or omit the field for current time.")
+            try:
+                datetime.fromisoformat(value)
+            except ValueError as err:
+                raise ValueError(f"Invalid reading_time ISO-8601 format '{value}': {err}") from err
+            return value
+        return value
+
 
 
 # ============================================================
@@ -1433,7 +1455,12 @@ class PatientStore:
         the assigned stay is active, and the reading timestamp matches the assignment window.
         """
         now_iso = datetime.now(timezone.utc).isoformat()
-        reading_time = _utc_iso(reading.get("reading_time")) if reading.get("reading_time") else now_iso
+        reading_time_raw = reading.get("reading_time")
+        if reading_time_raw is None:
+            reading_time = now_iso
+        else:
+            reading_time = _utc_iso(reading_time_raw)
+
 
         fluid_ml = reading.get("fluid_ml")
         bpm = reading.get("bpm")
@@ -1476,6 +1503,7 @@ class PatientStore:
             patient_id: int | None = None
             stay_id: int | None = None
             assignment_id: int | None = None
+            is_active_attribution: bool = False
 
             if assignment:
                 # Validate stay is active and matches patient
@@ -1488,6 +1516,34 @@ class PatientStore:
                         patient_id = assignment["patient_id"]
                         stay_id = assignment["stay_id"]
                         assignment_id = assignment["id"]
+                        is_active_attribution = True
+
+            # If not attributed to current active assignment, check historical assignments
+            # for delayed packet arrival (tagged to original assignment timeframe, not new patient)
+            if patient_id is None:
+                hist_assignment = connection.execute(
+                    """
+                    SELECT a.id, a.patient_id, a.stay_id, a.assigned_at, a.unassigned_at,
+                           s.patient_id as stay_patient_id
+                    FROM device_assignments a
+                    JOIN icu_stays s ON a.stay_id = s.id
+                    WHERE a.device_id = ?
+                      AND a.assignment_status = 'ended'
+                      AND a.assigned_at <= ?
+                      AND a.unassigned_at IS NOT NULL
+                      AND a.unassigned_at >= ?
+                    ORDER BY a.assigned_at DESC
+                    LIMIT 1
+                    """,
+                    (device_id, reading_time, reading_time),
+                ).fetchone()
+                if (
+                    hist_assignment
+                    and hist_assignment["stay_patient_id"] == hist_assignment["patient_id"]
+                ):
+                    patient_id = hist_assignment["patient_id"]
+                    stay_id = hist_assignment["stay_id"]
+                    assignment_id = hist_assignment["id"]
 
             cursor = connection.execute(
                 """
@@ -1519,8 +1575,8 @@ class PatientStore:
             res = dict(row)
             res["quality_metadata"] = validity
 
-        # Evaluate alerts for attributed telemetry outside the transaction
-        if patient_id is not None and stay_id is not None:
+        # Evaluate alerts for attributed telemetry outside the transaction only if currently active
+        if is_active_attribution and patient_id is not None and stay_id is not None:
             try:
                 self._evaluate_telemetry_alerts(
                     patient_id=patient_id,
