@@ -1,0 +1,56 @@
+# ============================================================
+# Smart ICU Patient Safety System - Docker Compose
+# Orchestrates FastAPI backend and React/Nginx frontend
+# ============================================================
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: smart-icu-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - SMART_ICU_SERIAL_PORT=NONE
+      - SMART_ICU_BAUDRATE=115200
+      - SMART_ICU_DEVICE_ID=ESP32-001
+      - SMART_ICU_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:80,http://localhost
+    volumes:
+      # Persistent clinical data and alert dataset
+      - ./data:/app/data
+      # Read-only mount of validated ML model artifacts
+      - ./ml/models:/app/ml/models:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - smart-icu-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: smart-icu-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - smart-icu-net
+
+networks:
+  smart-icu-net:
+    driver: bridge

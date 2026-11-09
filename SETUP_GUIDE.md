@@ -1,6 +1,16 @@
 # Setup Guide
 
-## Requirements
+> [!TIP]
+> **Preferred Quickstart: Docker & Docker Compose**
+> To launch Smart ICU without manually installing Python, Node.js, or configuring local virtual environments:
+> ```bash
+> git clone https://github.com/Nishitha-lab/Smart-ICU-Monitor.git
+> cd Smart-ICU
+> docker compose up --build
+> ```
+> Open [http://localhost:5173](http://localhost:5173) in your browser. See [README.md](./README.md#5-docker--docker-compose-quickstart-recommended) for full Docker documentation.
+
+## Requirements (Manual Setup)
 
 - Windows PowerShell.
 - Python 3.11 or newer.

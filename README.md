@@ -138,7 +138,120 @@ A core safety requirement of the Smart ICU architecture is preventing telemetry 
 
 ---
 
-## 5. Local Setup & Execution (Windows)
+## 5. Docker & Docker Compose Quickstart (Recommended)
+
+Smart ICU can be launched with a single command using Docker and Docker Compose, eliminating manual Python, Node.js, and package version conflicts across host operating systems.
+
+### 1. Prerequisites & Docker Desktop Setup
+- **Operating System:** Windows 10/11 64-bit (WSL2 recommended), macOS (Intel or Apple Silicon), or Linux (Ubuntu 20.04+, Debian 11+).
+- **System Memory:** Minimum 4 GB RAM (8 GB recommended).
+- **Docker Installation:**
+  - Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows/macOS) or Docker Engine + Docker Compose Plugin (Linux).
+  - Verify Docker in your terminal:
+    ```bash
+    docker --version
+    docker compose version
+    ```
+
+### 2. Repository Cloning
+```bash
+git clone https://github.com/Nishitha-lab/Smart-ICU-Monitor.git Smart-ICU
+cd Smart-ICU
+```
+
+### 3. Required Datasets & Model Artifacts
+Before launching containers, verify that required data and model artifacts are present:
+- **Historical Reference Population JSON (`data/processed/eicu_population_reference_v1.json`):**
+  - Included and tracked in the repository. Automatically mounted into the container.
+- **Machine Learning Models (`ml/models/`):**
+  - Baseline models (`deterioration_logistic_v1.joblib`, `anomaly_isolation_forest_v2.joblib`, `deterioration_gradient_boosting_v1.joblib`, `deterioration_random_forest_v1.joblib`) and `model_comparison_metrics.json` are committed to the repository and mounted read-only (`:ro`).
+- **Final Alert Research Dataset (`data/processed/smart_icu_final_alerts.csv`):**
+  - **Required for historical eICU triage dashboard.**
+  - Due to eICU data use restrictions, patient-level derived CSVs are excluded from Git.
+  - If you have an authorized copy of `smart_icu_final_alerts.csv`, place it at:
+    ```text
+    data/processed/smart_icu_final_alerts.csv
+    ```
+  - *If absent:* The backend starts up and clinical CRUD/telemetry operations operate normally, but the historical eICU dataset endpoints return a clear `FileNotFoundError` explaining that the CSV is missing.
+
+### 4. Environment Configuration
+The system uses sensible defaults out of the box in `docker-compose.yml`. You may optionally configure environment variables via a root `.env` file or directly in `docker-compose.yml`:
+```ini
+SMART_ICU_SERIAL_PORT=NONE
+SMART_ICU_BAUDRATE=115200
+SMART_ICU_DEVICE_ID=ESP32-001
+SMART_ICU_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:80,http://localhost
+```
+
+### 5. One-Command Application Startup
+Build and start both backend and frontend containers:
+```bash
+docker compose up --build
+```
+Or run in the background (detached mode):
+```bash
+docker compose up -d --build
+```
+
+### 6. Accessing the Application
+Once the containers are running and healthy, open your web browser:
+- **Frontend Web Dashboard:** [http://localhost:5173](http://localhost:5173)
+  *(Served via Nginx with built-in SPA routing and automatic reverse proxy for `/api/` and `/health`)*
+- **Backend Direct Access & Health Check:** [http://localhost:8000/health](http://localhost:8000/health)
+- **Interactive Swagger / OpenAPI Documentation:** [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Alternative ReDoc API Documentation:** [http://localhost:8000/redoc](http://localhost:8000/redoc)
+
+### 7. Stopping, Rebuilding & Viewing Logs
+- **Stop containers:**
+  ```bash
+  docker compose down
+  ```
+- **Stop containers and delete volumes (clean reset):**
+  ```bash
+  docker compose down -v
+  ```
+- **Rebuild images cleanly:**
+  ```bash
+  docker compose build --no-cache
+  docker compose up -d
+  ```
+- **View aggregated real-time logs:**
+  ```bash
+  docker compose logs -f
+  ```
+- **View logs for a specific service:**
+  ```bash
+  docker compose logs -f backend
+  docker compose logs -f frontend
+  ```
+- **Inspect container status and health:**
+  ```bash
+  docker compose ps
+  ```
+
+### 8. Running Automated Tests Inside Containers
+Run the backend test suite directly inside the running backend container:
+```bash
+docker compose exec backend pytest tests -v
+```
+
+### 9. Troubleshooting Common Errors
+- **Port 5173 or 8000 already in use:**
+  - Check if another application or development server is using port 5173 or 8000. Stop the competing service, or adjust the port mapping in `docker-compose.yml` (e.g. `"5174:80"` or `"8001:8000"`).
+- **Backend logs show `Smart-ICU dataset not found`:**
+  - Confirm that `data/processed/smart_icu_final_alerts.csv` is present in your host `data/processed/` directory.
+- **Frontend displays connection or network error:**
+  - Verify that the backend container is healthy: run `docker compose ps` and verify `smart-icu-backend` status is `(healthy)`.
+- **Hardware Serial Warning / `SerialException`:**
+  - Physical ESP32 hardware is completely optional. The container environment defaults to `SMART_ICU_SERIAL_PORT=NONE`, ensuring the server starts and operates in software mode without errors.
+- **Container health check failing:**
+  - Inspect backend startup trace: `docker compose logs backend`.
+
+---
+
+## 6. Local Manual Setup & Execution (Alternative)
+
+For developers actively modifying code who prefer running directly on the host machine without Docker:
 
 ### Prerequisites
 - Python 3.11+
@@ -168,7 +281,6 @@ uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 - Interactive OpenAPI Docs: `http://127.0.0.1:8000/docs`
 - Health Check: `http://127.0.0.1:8000/health`
 
-
 ### 3. Frontend Setup & Launch
 In a second PowerShell terminal:
 ```powershell
@@ -180,7 +292,7 @@ Open `http://localhost:5173` in your browser.
 
 ---
 
-## 6. Demonstration Without Physical Hardware
+## 7. Demonstration Without Physical Hardware
 
 You can demonstrate and test the full end-to-end attribution lifecycle without needing a physical ESP32 connected:
 
@@ -206,7 +318,7 @@ You can demonstrate and test the full end-to-end attribution lifecycle without n
 
 ---
 
-## 6. Unified Clinical Alert & ML Intelligence Engine
+## 8. Unified Clinical Alert & ML Intelligence Engine
 
 The platform integrates a continuous clinical interpretation and deterministic alert engine synthesizing multiple data streams:
 
@@ -296,7 +408,7 @@ For complete technical specifications, see [docs/MODEL_COMPATIBILITY.md](docs/MO
 
 ---
 
-## 7. REST API Reference
+## 9. REST API Reference
 
 ### Patients
 - `POST /api/patients` - Register a patient (`name`, `patient_code`, `age`, `sex`, `date_of_birth`, `contact_information`, `weight_kg`).
@@ -349,7 +461,7 @@ For complete technical specifications, see [docs/MODEL_COMPATIBILITY.md](docs/MO
 
 ---
 
-## 8. Automated Testing & Verification
+## 10. Automated Testing & Verification
 
 The codebase includes comprehensive unit, integration, attribution safety, lifecycle, and UI component tests:
 
@@ -402,7 +514,7 @@ npm run build
 
 ---
 
-## 9. Academic Limitations & Boundary Notice
+## 11. Academic Limitations & Boundary Notice
 
 1. **Authentication:** All endpoints, including clinical-record routes, are unauthenticated; caller-supplied `entered_by` values are not verified identities. Use only on localhost for synthetic demonstrations. Deployment on public or shared networks is prohibited until proper authentication, authorization, and audit-identity verification are implemented.
 2. **Clinical Reference Ranges:** Displayed flags and validation bounds are technical sanity checks, not diagnostic algorithms.

@@ -4,7 +4,7 @@ from datetime import datetime
 import os
 from typing import Literal
 from uuid import UUID
-
+from typing import Any, Optional
 from services.serial_service import serial_monitor
 from services.clinical_alert_engine import clinical_alert_engine, ClinicalInterpretation
 from services.alert_manager import AlertManager, AlertAcknowledgeRequest, AlertResolveRequest
@@ -110,12 +110,26 @@ async def clinical_record_database_busy(
     )
 
 
+cors_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:80",
+    "http://127.0.0.1:80",
+    "http://localhost",
+    "http://127.0.0.1",
+]
+env_cors = os.getenv("SMART_ICU_CORS_ORIGINS", "").strip()
+if env_cors:
+    for origin in env_cors.split(","):
+        cleaned = origin.strip()
+        if cleaned and cleaned not in cors_origins:
+            cors_origins.append(cleaned)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,0 +1,39 @@
+# ============================================================
+# Smart ICU .dockerignore
+# Prevents bulky, non-reproducible local artifacts from entering build context
+# ============================================================
+
+# Virtual environments and compiled caches
+**/.venv/
+**/.venv*/
+**/venv/
+**/__pycache__/
+*.py[cod]
+*.pytest_cache
+*.coverage
+
+# Frontend dependencies and builds
+**/node_modules/
+**/dist/
+npm-debug.log*
+
+# Git metadata
+.git/
+.gitignore
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Large local archives
+*.zip
+Smart-ICU.zip
+
+# Raw eICU datasets and database journals
+data/real/
+data/*.sqlite3-journal
+data/*.sqlite3-shm
+data/*.sqlite3-wal
+
+# Agent and temporary workspaces
+.gemini/

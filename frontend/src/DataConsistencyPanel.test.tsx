@@ -244,7 +244,7 @@ describe("DataConsistencyPanel", () => {
     fireEvent.click(screen.getByText(/Re-evaluate Now/i));
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith(
+      expect(globalThis.fetch).toHaveBeenCalledWith(
         expect.stringContaining("/api/consistency/evaluate/101"),
         expect.objectContaining({ method: "POST" })
       );

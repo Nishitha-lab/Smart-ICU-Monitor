@@ -88,7 +88,7 @@ export interface DataConsistencyPanelProps {
 
 export const DataConsistencyPanel: React.FC<DataConsistencyPanelProps> = ({
   patientId,
-  stayId,
+  stayId: _stayId,
 }) => {
   const [activeTab, setActiveTab] = useState<"level1" | "level2" | "level3" | "history">("level1");
   const [report, setReport] = useState<ConsistencyEvaluationReport | null>(null);
@@ -97,7 +97,7 @@ export const DataConsistencyPanel: React.FC<DataConsistencyPanelProps> = ({
   const [evaluating, setEvaluating] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
-  const [engineStatus, setEngineStatus] = useState<string>("ONLINE");
+  const [engineStatus] = useState<string>("ONLINE");
   const [expandedMetric, setExpandedMetric] = useState<string | null>(null);
 
   const fetchEvaluation = useCallback(async () => {
