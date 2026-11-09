@@ -5,6 +5,7 @@
 
 # Python environments and generated caches
 **/.venv/
+**/.venv*/
 **/venv/
 **/__pycache__/
 *.py[cod]
@@ -43,3 +44,6 @@
 /data/processed/experiments/paired_models/experiment_configuration.json
 /data/processed/experiments/paired_anomaly/experiment_configuration.json
 /data/processed/experiments/alert_replay/replay_configuration.json
+
+# Candidate model validation exports (patient-level derived data)
+/ml/candidate_artifacts_v2/validation_predictions.csv

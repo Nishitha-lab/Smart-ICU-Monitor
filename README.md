@@ -138,7 +138,120 @@ A core safety requirement of the Smart ICU architecture is preventing telemetry 
 
 ---
 
-## 5. Local Setup & Execution (Windows)
+## 5. Docker & Docker Compose Quickstart (Recommended)
+
+Smart ICU can be launched with a single command using Docker and Docker Compose, eliminating manual Python, Node.js, and package version conflicts across host operating systems.
+
+### 1. Prerequisites & Docker Desktop Setup
+- **Operating System:** Windows 10/11 64-bit (WSL2 recommended), macOS (Intel or Apple Silicon), or Linux (Ubuntu 20.04+, Debian 11+).
+- **System Memory:** Minimum 4 GB RAM (8 GB recommended).
+- **Docker Installation:**
+  - Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows/macOS) or Docker Engine + Docker Compose Plugin (Linux).
+  - Verify Docker in your terminal:
+    ```bash
+    docker --version
+    docker compose version
+    ```
+
+### 2. Repository Cloning
+```bash
+git clone https://github.com/Nishitha-lab/Smart-ICU-Monitor.git Smart-ICU
+cd Smart-ICU
+```
+
+### 3. Required Datasets & Model Artifacts
+Before launching containers, verify that required data and model artifacts are present:
+- **Historical Reference Population JSON (`data/processed/eicu_population_reference_v1.json`):**
+  - Included and tracked in the repository. Automatically mounted into the container.
+- **Machine Learning Models (`ml/models/`):**
+  - Baseline models (`deterioration_logistic_v1.joblib`, `anomaly_isolation_forest_v2.joblib`, `deterioration_gradient_boosting_v1.joblib`, `deterioration_random_forest_v1.joblib`) and `model_comparison_metrics.json` are committed to the repository and mounted read-only (`:ro`).
+- **Final Alert Research Dataset (`data/processed/smart_icu_final_alerts.csv`):**
+  - **Required for historical eICU triage dashboard.**
+  - Due to eICU data use restrictions, patient-level derived CSVs are excluded from Git.
+  - If you have an authorized copy of `smart_icu_final_alerts.csv`, place it at:
+    ```text
+    data/processed/smart_icu_final_alerts.csv
+    ```
+  - *If absent:* The backend starts up and clinical CRUD/telemetry operations operate normally, but the historical eICU dataset endpoints return a clear `FileNotFoundError` explaining that the CSV is missing.
+
+### 4. Environment Configuration
+The system uses sensible defaults out of the box in `docker-compose.yml`. You may optionally configure environment variables via a root `.env` file or directly in `docker-compose.yml`:
+```ini
+SMART_ICU_SERIAL_PORT=NONE
+SMART_ICU_BAUDRATE=115200
+SMART_ICU_DEVICE_ID=ESP32-001
+SMART_ICU_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:80,http://localhost
+```
+
+### 5. One-Command Application Startup
+Build and start both backend and frontend containers:
+```bash
+docker compose up --build
+```
+Or run in the background (detached mode):
+```bash
+docker compose up -d --build
+```
+
+### 6. Accessing the Application
+Once the containers are running and healthy, open your web browser:
+- **Frontend Web Dashboard:** [http://localhost:5173](http://localhost:5173)
+  *(Served via Nginx with built-in SPA routing and automatic reverse proxy for `/api/` and `/health`)*
+- **Backend Direct Access & Health Check:** [http://localhost:8000/health](http://localhost:8000/health)
+- **Interactive Swagger / OpenAPI Documentation:** [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Alternative ReDoc API Documentation:** [http://localhost:8000/redoc](http://localhost:8000/redoc)
+
+### 7. Stopping, Rebuilding & Viewing Logs
+- **Stop containers:**
+  ```bash
+  docker compose down
+  ```
+- **Stop containers and delete volumes (clean reset):**
+  ```bash
+  docker compose down -v
+  ```
+- **Rebuild images cleanly:**
+  ```bash
+  docker compose build --no-cache
+  docker compose up -d
+  ```
+- **View aggregated real-time logs:**
+  ```bash
+  docker compose logs -f
+  ```
+- **View logs for a specific service:**
+  ```bash
+  docker compose logs -f backend
+  docker compose logs -f frontend
+  ```
+- **Inspect container status and health:**
+  ```bash
+  docker compose ps
+  ```
+
+### 8. Running Automated Tests Inside Containers
+Run the backend test suite directly inside the running backend container:
+```bash
+docker compose exec backend pytest tests -v
+```
+
+### 9. Troubleshooting Common Errors
+- **Port 5173 or 8000 already in use:**
+  - Check if another application or development server is using port 5173 or 8000. Stop the competing service, or adjust the port mapping in `docker-compose.yml` (e.g. `"5174:80"` or `"8001:8000"`).
+- **Backend logs show `Smart-ICU dataset not found`:**
+  - Confirm that `data/processed/smart_icu_final_alerts.csv` is present in your host `data/processed/` directory.
+- **Frontend displays connection or network error:**
+  - Verify that the backend container is healthy: run `docker compose ps` and verify `smart-icu-backend` status is `(healthy)`.
+- **Hardware Serial Warning / `SerialException`:**
+  - Physical ESP32 hardware is completely optional. The container environment defaults to `SMART_ICU_SERIAL_PORT=NONE`, ensuring the server starts and operates in software mode without errors.
+- **Container health check failing:**
+  - Inspect backend startup trace: `docker compose logs backend`.
+
+---
+
+## 6. Local Manual Setup & Execution (Alternative)
+
+For developers actively modifying code who prefer running directly on the host machine without Docker:
 
 ### Prerequisites
 - Python 3.11+
@@ -150,13 +263,19 @@ From PowerShell:
 ```powershell
 cd D:\Smart-ICU\backend
 py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
+
+> [!IMPORTANT]
+> **Dedicated Virtual Environment Required:**
+> Always execute backend services and tests using the dedicated virtual environment (`D:\Smart-ICU\backend\.venv\Scripts\python.exe` or by activating `.\backend\.venv\Scripts\Activate.ps1`). Do **NOT** invoke backend services or tests using unactivated system Python directly, as model artifacts are pinned to `scikit-learn==1.9.0`.
 
 ### 2. Start the Backend API
 ```powershell
 cd D:\Smart-ICU\backend
-.\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\Activate.ps1
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 - API Base: `http://127.0.0.1:8000`
 - Interactive OpenAPI Docs: `http://127.0.0.1:8000/docs`
@@ -173,7 +292,7 @@ Open `http://localhost:5173` in your browser.
 
 ---
 
-## 6. Demonstration Without Physical Hardware
+## 7. Demonstration Without Physical Hardware
 
 You can demonstrate and test the full end-to-end attribution lifecycle without needing a physical ESP32 connected:
 
@@ -199,7 +318,7 @@ You can demonstrate and test the full end-to-end attribution lifecycle without n
 
 ---
 
-## 6. Unified Clinical Alert & ML Intelligence Engine
+## 8. Unified Clinical Alert & ML Intelligence Engine
 
 The platform integrates a continuous clinical interpretation and deterministic alert engine synthesizing multiple data streams:
 
@@ -267,12 +386,29 @@ The platform integrates a continuous clinical interpretation and deterministic a
   - Positive ICU stays never flagged: **5** (Stays: 176730, 827085, 1073098, 1109136, 2901384).
 - **Experimental Risk Bands:** Low ($p < 0.05$), Moderate ($0.05 \le p < 0.15$), High ($0.15 \le p < 0.30$), Extreme ($p \ge 0.30$). These are presentation categories, not validated clinical severity classifications.
 - **Explainability:** Exact signed log-odds attribution ($\text{logit}(p) = \beta_0 + \sum \phi_j$) exposing `model_intercept` and `predicted_log_odds` down to the API.
-- **Model Artifact Provenance & Manifest:** The five current model artifacts were hashed and their file sizes and SHA-256 checksums recorded. These values match the current release manifest. Historical identity with an earlier trained baseline could not be independently established because the artifacts are not present in the available Git history.
 - **Offline Isolation:** Historical eICU models do not ingest live serial telemetry, preserving deterministic clinical rule safety.
+
+### Model Serialization & Runtime Compatibility Matrix
+
+For complete technical specifications, see [docs/MODEL_COMPATIBILITY.md](docs/MODEL_COMPATIBILITY.md).
+
+| Artifact | Artifact Path | Training `scikit-learn` | Model Type | Deployment Status | Dedicated Env (`backend\.venv`, 1.9.0) | System Python (`1.8.0`) |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **Baseline Deterioration v1** | `ml/models/deterioration_logistic_v1.joblib` | **`1.9.0`** | `LogisticRegression` Pipeline | **ACTIVE DEFAULT** | **SUPPORTED** (0 warnings) | **WARNING** (`InconsistentVersionWarning` $\times 4$; numerically equivalent) |
+| **Anomaly Isolation Forest v2** | `ml/models/anomaly_isolation_forest_v2.joblib` | **`1.9.0`** | `IsolationForest` Pipeline | **ACTIVE DEFAULT** | **SUPPORTED** (0 warnings) | **WARNING** (`InconsistentVersionWarning` $\times 304$; bit-for-bit identical) |
+| **Candidate Deterioration v2** | `ml/candidate_artifacts_v2/deterioration_candidate_v2.joblib` | **`1.8.0`** | `HistGradientBoosting` + Platt | **UNPROMOTED CANDIDATE** | **UNSUPPORTED** (Fails: `ModuleNotFoundError: No module named '_loss'`) | **SUPPORTED** (0 warnings; 13/13 candidate tests pass) |
+
+#### Key Technical Context:
+- **Dedicated Virtual Environment:** The backend environment (`D:\Smart-ICU\backend\.venv`) uses `scikit-learn==1.9.0`. Both baseline production models load cleanly without warnings.
+- **System Environment:** Unactivated system Python uses `scikit-learn 1.8.0`. Loading baseline models in 1.8.0 produces native `InconsistentVersionWarning`s.
+- **Empirical Numerical Equivalence:** Side-by-side empirical testing confirmed that on tested cross-version inputs, Isolation Forest scores and decision functions are identical bit-for-bit to 17 decimal places (variance $= 0.0$), and Logistic Regression v1 probabilities match within floating-point epsilon ($\le 3 \times 10^{-17}$).
+- **Candidate v2 Deserialization Limitation:** Candidate v2 was serialized under 1.8.0 and cannot be deserialized under 1.9.0 due to internal Cython loss module restructuring (`ModuleNotFoundError: No module named '_loss'`). Candidate v2 must be tested in a 1.8.0 environment until formally retrained under 1.9.0 upon promotion.
+- **Upstream Caveat:** Cross-version model persistence via pickle/joblib is officially unsupported by scikit-learn. Numerical equivalence on selected test inputs is not a guarantee of universal compatibility.
+- **Warning Visibility:** `InconsistentVersionWarning` is intentionally not suppressed to preserve auditability when running in non-standard environments.
 
 ---
 
-## 7. REST API Reference
+## 9. REST API Reference
 
 ### Patients
 - `POST /api/patients` - Register a patient (`name`, `patient_code`, `age`, `sex`, `date_of_birth`, `contact_information`, `weight_kg`).
@@ -325,23 +461,42 @@ The platform integrates a continuous clinical interpretation and deterministic a
 
 ---
 
-## 8. Automated Testing & Verification
+## 10. Automated Testing & Verification
 
 The codebase includes comprehensive unit, integration, attribution safety, lifecycle, and UI component tests:
 
-### Run Backend Tests (154 tests)
+### Run Backend Tests (225 tests)
 ```powershell
-$env:PYTHONPATH="backend"
-& "backend/.venv/Scripts/pytest.exe" backend/tests -v
+cd D:\Smart-ICU
+.\backend\.venv\Scripts\Activate.ps1
+pytest backend/tests -v -o pythonpath="backend ."
 ```
-- **154 automated tests** covering:
+Or directly:
+```powershell
+& "D:\Smart-ICU\backend\.venv\Scripts\python.exe" -m pytest backend/tests -v -o pythonpath="backend ."
+```
+
+> [!CAUTION]
+> **Do NOT run backend tests using unactivated system Python.**
+> The backend test suite relies on `scikit-learn==1.9.0` pinned in `backend/.venv`. Running under system Python (1.8.0) triggers `InconsistentVersionWarning` on baseline models and causes version mismatches.
+
+- **225 automated backend tests** covering:
   - `test_clinical_alert_engine.py`: KDIGO urine output, canonical lab registry, vitals rules, custom reference range parsing, duration parsing.
   - `test_alert_manager.py`: Alert lifecycle, deduplication fingerprinting, escalation, auto-resolution on normal reading, manual acknowledge/resolve, record revision/voiding synchronization.
+  - `test_data_consistency_engine.py` & `test_consistency_api.py`: Multi-source clinical data consistency, ESP32 vs manual entry verification, tolerance checking, unit conversion.
+  - `test_historical_reference_engine.py` & `test_patient_trend_analyzer.py`: Historical eICU population baseline comparisons, moving patient trend analysis, rate-of-change boundaries, and Isolation Forest anomaly scoring.
   - `test_ml_engine.py`: Serialized model inference, probability bounds, mathematical log-odds attribution, anomaly scoring, REST prediction endpoint.
   - `test_ml_safety.py`: ML status reporting, missing artifact diagnostics, deterrence of synthetic score fabrication.
   - `test_telemetry_alerts.py`: Bedside IV fluid and vital alerts, quality masking, patient attribution isolation.
-  - `test_alert_api.py`: REST API integration for alerts, summary, triage, and record evaluation.
+  - `test_telemetry_timestamp_validation.py`: P1 timestamp validation, UTC normalization, rejection of unparseable/future timestamps.
   - Plus all regression tests for patient lifecycle, admissions, device assignment, concurrency, and stress bursts.
+  - *Candidate v2 Evaluation Suite (1.8.0):* Run via dedicated candidate evaluation environment:
+    ```powershell
+    .\ml\.venv_candidate\Scripts\Activate.ps1
+    pytest backend/tests/test_ml_candidate_inference.py -v -o pythonpath="backend ."
+    ```
+    *(All 13 candidate inference tests pass with 100% success)*
+
 
 ### Run Frontend Tests & Checks (46 tests)
 ```powershell
@@ -359,7 +514,7 @@ npm run build
 
 ---
 
-## 9. Academic Limitations & Boundary Notice
+## 11. Academic Limitations & Boundary Notice
 
 1. **Authentication:** All endpoints, including clinical-record routes, are unauthenticated; caller-supplied `entered_by` values are not verified identities. Use only on localhost for synthetic demonstrations. Deployment on public or shared networks is prohibited until proper authentication, authorization, and audit-identity verification are implemented.
 2. **Clinical Reference Ranges:** Displayed flags and validation bounds are technical sanity checks, not diagnostic algorithms.

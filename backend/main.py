@@ -4,7 +4,7 @@ from datetime import datetime
 import os
 from typing import Literal
 from uuid import UUID
-
+from typing import Any, Optional
 from services.serial_service import serial_monitor
 from services.clinical_alert_engine import clinical_alert_engine, ClinicalInterpretation
 from services.alert_manager import AlertManager, AlertAcknowledgeRequest, AlertResolveRequest
@@ -31,6 +31,11 @@ from services.patient_service import (
     TelemetryIngest,
 )
 
+from services.clinical_data_intelligence import ClinicalDataIntelligenceCoordinator
+from services.data_consistency_engine import data_consistency_engine
+from services.patient_trend_analyzer import patient_trend_analyzer
+from services.historical_reference_engine import historical_reference_engine
+
 import pandas as pd
 from pydantic import BaseModel, Field
 from fastapi import Body, FastAPI, HTTPException, Query, Request
@@ -55,6 +60,13 @@ if not CLINICAL_DB_FILE.is_absolute():
 clinical_record_store = ClinicalRecordStore(CLINICAL_DB_FILE)
 patient_store = PatientStore(CLINICAL_DB_FILE)
 alert_manager = AlertManager(CLINICAL_DB_FILE)
+clinical_intelligence = ClinicalDataIntelligenceCoordinator(
+    database_path=CLINICAL_DB_FILE,
+    consistency_engine=data_consistency_engine,
+    trend_analyzer=patient_trend_analyzer,
+    reference_engine=historical_reference_engine,
+    alert_manager=alert_manager,
+)
 
 
 # ============================================================
@@ -70,6 +82,7 @@ async def lifespan(app: FastAPI):
     patient_store.initialize()
     clinical_record_store.initialize()
     alert_manager.initialize()
+    clinical_intelligence.initialize()
     serial_monitor.set_on_reading(patient_store.ingest_reading)
     serial_monitor.start()
     try:
@@ -97,12 +110,26 @@ async def clinical_record_database_busy(
     )
 
 
+cors_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:80",
+    "http://127.0.0.1:80",
+    "http://localhost",
+    "http://127.0.0.1",
+]
+env_cors = os.getenv("SMART_ICU_CORS_ORIGINS", "").strip()
+if env_cors:
+    for origin in env_cors.split(","):
+        cleaned = origin.strip()
+        if cleaned and cleaned not in cors_origins:
+            cors_origins.append(cleaned)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -433,6 +460,13 @@ def create_clinical_record(record: ClinicalRecordCreate):
         created["interpretation"] = interp.model_dump()
     if alert:
         created["alert"] = alert
+
+    if record.patient_id is not None:
+        try:
+            clinical_intelligence.evaluate_patient(record.patient_id)
+        except Exception:
+            pass
+
     return created
 
 
@@ -714,6 +748,13 @@ def update_clinical_record(record_id: UUID, record: ClinicalRecordUpdate):
         updated["interpretation"] = interp.model_dump()
     if alert:
         updated["alert"] = alert
+
+    if updated.get("patient_id") is not None:
+        try:
+            clinical_intelligence.evaluate_patient(updated["patient_id"])
+        except Exception:
+            pass
+
     return updated
 
 
@@ -740,6 +781,13 @@ def void_clinical_record(
         reason=f"Clinical record voided: {void.void_reason}",
         voided_by=void.voided_by,
     )
+
+    if voided.get("patient_id") is not None:
+        try:
+            clinical_intelligence.evaluate_patient(voided["patient_id"])
+        except Exception:
+            pass
+
     return voided
 
 
@@ -1092,8 +1140,12 @@ def inject_device_telemetry(device_id: str, reading: TelemetryIngest):
     Ingest or simulate incoming telemetry for a device.
     Associates reading with patient and stay strictly based on active backend assignment.
     """
-    reading_dict = reading.model_dump()
-    return patient_store.ingest_reading(device_id, reading_dict)
+    try:
+        reading_dict = reading.model_dump()
+        return patient_store.ingest_reading(device_id, reading_dict)
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail=str(err))
+
 
 
 @app.get("/api/patients/{patient_ref}/timeline")
@@ -1764,3 +1816,139 @@ def predict_patient_ml(stay_id: int):
         "series": series,
         "disclaimer": det_result.get("disclaimer"),
     }
+
+
+# ============================================================
+# DATA CONSISTENCY & INTELLIGENCE ENGINE ENDPOINTS
+# ============================================================
+
+@app.get("/api/consistency/status")
+def get_consistency_status():
+    """
+    Returns the operational status, reference distributions, and tolerance configuration
+    of the Unified Clinical Data Consistency & Intelligence Engine.
+    """
+    return clinical_intelligence.get_status()
+
+
+@app.get("/api/consistency/patient/{patient_id}")
+def get_patient_consistency(patient_id: int):
+    """
+    Retrieves the latest multi-level clinical data consistency and anomaly detection
+    evaluation for a registered patient's active ICU stay.
+    """
+    pat = patient_store.get_patient(patient_id)
+    if not pat:
+        raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found.")
+    try:
+        return clinical_intelligence.evaluate_patient(patient_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Consistency evaluation failed: {exc}")
+
+
+@app.get("/api/consistency/patient/{patient_id}/history")
+def get_patient_consistency_history(
+    patient_id: int,
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    """
+    Retrieves historical consistency checks, patient trend anomalies, and historical
+    population comparison records for a patient.
+    """
+    pat = patient_store.get_patient(patient_id)
+    if not pat:
+        raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found.")
+    return clinical_intelligence.get_patient_consistency_history(patient_id, limit=limit)
+
+
+@app.get("/api/consistency/alerts")
+def get_consistency_alerts(
+    patient_id: int | None = Query(default=None),
+    stay_id: int | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    source: str | None = Query(default=None),
+    status: str | None = Query(default="ACTIVE"),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    """
+    Retrieves active or filtered alerts originating from the data consistency engine
+    (CROSS_SOURCE_DISCREPANCY, PATIENT_TREND_ANOMALY, HISTORICAL_POPULATION_ANOMALY).
+    """
+    allowed_sources = {
+        "CROSS_SOURCE_DISCREPANCY",
+        "PATIENT_TREND_ANOMALY",
+        "HISTORICAL_POPULATION_ANOMALY",
+    }
+    req_source = source if source in allowed_sources else None
+
+    raw_alerts = alert_manager.list_alerts(
+        patient_id=patient_id,
+        stay_id=stay_id,
+        severity=severity,
+        source=req_source,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    if not req_source:
+        filtered = [a for a in raw_alerts if a.get("source") in allowed_sources]
+    else:
+        filtered = raw_alerts
+
+    return {"alerts": filtered, "total": len(filtered)}
+
+
+@app.post("/api/consistency/evaluate/{patient_id}")
+def evaluate_patient_consistency(patient_id: int):
+    """
+    Explicitly triggers an on-demand multi-level consistency and anomaly re-evaluation
+    for a patient's active ICU stay.
+    """
+    pat = patient_store.get_patient(patient_id)
+    if not pat:
+        raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found.")
+    try:
+        return clinical_intelligence.evaluate_patient(patient_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Evaluation failed: {exc}")
+
+
+@app.post("/api/consistency/alerts/{alert_id}/acknowledge")
+def acknowledge_consistency_alert(alert_id: str, req: AlertAcknowledgeRequest):
+    """
+    Acknowledge a consistency or anomaly alert with clinician identification and notes.
+    """
+    try:
+        updated = alert_manager.acknowledge_alert(
+            alert_id=alert_id,
+            acknowledged_by=req.acknowledged_by,
+            note=req.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Alert '{alert_id}' not found.")
+    return updated
+
+
+@app.post("/api/consistency/alerts/{alert_id}/resolve")
+def resolve_consistency_alert(alert_id: str, req: AlertResolveRequest):
+    """
+    Resolve a consistency or anomaly alert with clinician resolution notes.
+    """
+    try:
+        updated = alert_manager.resolve_alert(
+            alert_id=alert_id,
+            resolved_by=req.resolved_by,
+            note=req.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Alert '{alert_id}' not found.")
+    return updated

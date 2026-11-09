@@ -89,6 +89,9 @@ const SOURCE_LABELS: Record<string, string> = {
   HISTORICAL_EICU: "Historical eICU",
   ML_ANOMALY: "ML Anomaly",
   ML_RISK: "ML Risk Model",
+  CROSS_SOURCE_DISCREPANCY: "Cross-Source Discrepancy",
+  PATIENT_TREND_ANOMALY: "Patient Trend Anomaly",
+  HISTORICAL_POPULATION_ANOMALY: "Historical Population Anomaly",
 };
 
 export default function AlertPanel() {
@@ -444,6 +447,9 @@ export default function AlertPanel() {
             <option value="CLINICAL_OBSERVATION">Clinical Observation</option>
             <option value="URINE_OUTPUT">Urine Output (KDIGO)</option>
             <option value="NURSE_OBSERVATION">Nurse Observation</option>
+            <option value="CROSS_SOURCE_DISCREPANCY">Cross-Source Discrepancy</option>
+            <option value="PATIENT_TREND_ANOMALY">Patient Trend Anomaly</option>
+            <option value="HISTORICAL_POPULATION_ANOMALY">Historical Population Anomaly</option>
           </select>
         </div>
 

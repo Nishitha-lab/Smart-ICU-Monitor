@@ -29,6 +29,9 @@ AlertSource = Literal[
     "HISTORICAL_EICU",
     "ML_ANOMALY",
     "ML_RISK",
+    "CROSS_SOURCE_DISCREPANCY",
+    "PATIENT_TREND_ANOMALY",
+    "HISTORICAL_POPULATION_ANOMALY",
 ]
 
 SEVERITY_WEIGHT: dict[str, int] = {
@@ -387,6 +390,199 @@ class AlertManager:
                 "SELECT * FROM clinical_alerts WHERE alert_id = ?", (new_alert_id,)
             ).fetchone()
             return dict(row)
+
+    def process_consistency_alert(
+        self,
+        patient_id: int,
+        stay_id: int | None,
+        source: AlertSource,
+        metric_name: str,
+        measured_value: Any,
+        unit: str | None,
+        severity: AlertSeverity,
+        category: str,
+        explanation: str,
+        recommendation: str | None = None,
+        trigger_time: str | None = None,
+        record_id: str | None = None,
+        reference_range: str | None = None,
+        critical_threshold: str | None = None,
+        rule_version: str = "1.0.0",
+    ) -> dict[str, Any] | None:
+        """
+        Create, escalate, or deduplicate consistency and anomaly alerts.
+        Deduplicates via fingerprinting without creating duplicate active alerts on repeated polling.
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+        trig_iso = trigger_time or now_iso
+        patient_ref = str(stay_id or patient_id)
+        fingerprint = self.compute_fingerprint(patient_ref, source, metric_name)
+
+        new_weight = SEVERITY_WEIGHT.get(severity, 2)
+
+        with self._connection() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM clinical_alerts
+                WHERE fingerprint = ? AND status IN ('ACTIVE', 'ACKNOWLEDGED')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (fingerprint,),
+            ).fetchone()
+
+            if existing:
+                existing_weight = SEVERITY_WEIGHT.get(existing["severity"], 2)
+                alert_id = existing["alert_id"]
+
+                # Escalation if severity strictly increased
+                if new_weight > existing_weight:
+                    connection.execute(
+                        """
+                        UPDATE clinical_alerts
+                        SET severity = ?, measured_value = ?, unit = ?, reference_range = ?,
+                            critical_threshold = ?, explanation = ?, trigger_time = ?,
+                            record_id = ?, status = 'ACTIVE', updated_at = ?
+                        WHERE alert_id = ?
+                        """,
+                        (
+                            severity,
+                            str(measured_value),
+                            unit,
+                            reference_range,
+                            critical_threshold,
+                            explanation,
+                            trig_iso,
+                            record_id,
+                            now_iso,
+                            alert_id,
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO alert_audit_logs (alert_id, action, performed_by, note, timestamp, details_json)
+                        VALUES (?, 'ESCALATED', 'SYSTEM_CONSISTENCY_ENGINE', ?, ?, ?)
+                        """,
+                        (
+                            alert_id,
+                            f"Alert escalated from {existing['severity']} to {severity}.",
+                            now_iso,
+                            json.dumps(
+                                {
+                                    "old_severity": existing["severity"],
+                                    "new_severity": severity,
+                                    "measured_value": measured_value,
+                                    "reason": "Discrepancy or anomaly severity worsened.",
+                                }
+                            ),
+                        ),
+                    )
+                    row = connection.execute(
+                        "SELECT * FROM clinical_alerts WHERE alert_id = ?", (alert_id,)
+                    ).fetchone()
+                    return dict(row)
+
+                # Deduplicated: active alert already exists with >= severity
+                return dict(existing)
+
+            # Create brand-new alert
+            new_alert_id = f"ALT-{uuid.uuid4().hex[:12].upper()}"
+            connection.execute(
+                """
+                INSERT INTO clinical_alerts (
+                    alert_id, patient_id, stay_id, patientunitstayid, source,
+                    measurement_name, measured_value, unit, reference_range,
+                    critical_threshold, severity, category, explanation,
+                    trigger_time, record_id, rule_version, status, fingerprint,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)
+                """,
+                (
+                    new_alert_id,
+                    patient_id,
+                    stay_id,
+                    source,
+                    metric_name,
+                    str(measured_value),
+                    unit,
+                    reference_range,
+                    critical_threshold,
+                    severity,
+                    category,
+                    explanation,
+                    trig_iso,
+                    record_id,
+                    rule_version,
+                    fingerprint,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO alert_audit_logs (alert_id, action, performed_by, note, timestamp, details_json)
+                VALUES (?, 'CREATED', 'SYSTEM_CONSISTENCY_ENGINE', 'Alert generated by data consistency engine.', ?, ?)
+                """,
+                (
+                    new_alert_id,
+                    now_iso,
+                    json.dumps(
+                        {
+                            "source": source,
+                            "severity": severity,
+                            "metric": metric_name,
+                            "value": measured_value,
+                            "recommendation": recommendation,
+                        }
+                    ),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM clinical_alerts WHERE alert_id = ?", (new_alert_id,)
+            ).fetchone()
+            return dict(row)
+
+    def auto_resolve_consistency_alert(
+        self,
+        patient_id: int,
+        stay_id: int | None,
+        source: AlertSource,
+        metric_name: str,
+        resolution_reason: str,
+    ) -> None:
+        """
+        Auto-resolves any active consistency or anomaly alert when values become normal or consistent.
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+        patient_ref = str(stay_id or patient_id)
+        fingerprint = self.compute_fingerprint(patient_ref, source, metric_name)
+
+        with self._connection() as connection:
+            active = connection.execute(
+                """
+                SELECT alert_id FROM clinical_alerts
+                WHERE fingerprint = ? AND status IN ('ACTIVE', 'ACKNOWLEDGED')
+                """,
+                (fingerprint,),
+            ).fetchall()
+
+            for row in active:
+                aid = row["alert_id"]
+                connection.execute(
+                    """
+                    UPDATE clinical_alerts
+                    SET status = 'RESOLVED', resolved_at = ?, resolved_by = 'SYSTEM_AUTO_RESOLVE',
+                        resolution_note = ?, updated_at = ?
+                    WHERE alert_id = ?
+                    """,
+                    (now_iso, resolution_reason, now_iso, aid),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO alert_audit_logs (alert_id, action, performed_by, note, timestamp, details_json)
+                    VALUES (?, 'RESOLVED', 'SYSTEM_AUTO_RESOLVE', ?, ?, ?)
+                    """,
+                    (aid, resolution_reason, now_iso, json.dumps({"reason": resolution_reason})),
+                )
 
     def supersede_alerts_for_record(self, record_id: str, reason: str, voided_by: str = "SYSTEM") -> int:
         """

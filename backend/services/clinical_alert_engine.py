@@ -563,10 +563,11 @@ class ClinicalAlertEngine:
                     unit="mL/kg/h",
                     reference_range=ref_range_disp,
                     critical_threshold="> 2.5 mL/kg/h",
-                    reference_source="KDIGO Clinical Practice Guideline for AKI (2012)",
+                    reference_source="General ICU Monitoring Heuristic (Unverified Provenance)",
                     explanation=(
-                        f"POLYURIA — measured {rate_disp}. Unusually high urine output; monitor for dehydration, "
-                        "post-obstructive diuresis, or diabetes insipidus."
+                        f"POLYURIA — measured {rate_disp}. Unusually high urine output (monitoring heuristic; "
+                        "not a KDIGO AKI staging criterion). Monitor for dehydration, post-obstructive diuresis, "
+                        "or diabetes insipidus."
                     ),
                     requires_alert=True,
                     evaluation_version=self.VERSION,
